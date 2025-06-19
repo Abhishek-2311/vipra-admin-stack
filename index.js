@@ -1,45 +1,29 @@
+'use strict';
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs').promises;
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const mysql = require('mysql2/promise');
+const fs = require('fs').promises;
 
-const app = express();
-app.use(express.json());
+console.log('--- LAMBDA COLD START ---');
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
-const corsOptions = {
-    origin: (origin, callback) => {
-        if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-};
-app.use(cors(corsOptions));
-
-// Database connection pool
-const dbPool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    port: process.env.DB_PORT,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-});
-
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Define variables for the clients, but do not initialize them here.
+let dbPool;
+let genAI;
 
 // --- Helper Functions ---
 
-// ... inside vipra-admin-stack/index.js
-
 async function getSystemPrompt(userRole) {
+    // First, check if the required files exist. This helps debug deployment issues.
+    const requiredFiles = ['schema.txt', 'sampledata.txt', 'example queries.txt'];
+    for (const file of requiredFiles) {
+        try {
+            await fs.access(file);
+        } catch (error) {
+            // If a file is missing, throw a specific error that will be sent to the user.
+            throw new Error(`Critical file not found: ${file}. Please ensure it is included in your SAM deployment package.`);
+        }
+    }
+
     try {
         const schema = await fs.readFile('schema.txt', 'utf-8');
         const sample = await fs.readFile('sampledata.txt', 'utf-8');
@@ -120,107 +104,217 @@ function isQuerySafe(sql) {
     return true;
 }
 
+exports.handler = async (event) => {
+    console.log('--- HANDLER INVOCATION ---');
+    console.log('EVENT:', JSON.stringify(event));
 
-// --- API Endpoints ---
+    // Extract path and method from the event
+    // For REST API (API Gateway v1), the path is in event.path
+    // For HTTP API (API Gateway v2), the path would be in event.rawPath
+    const path = event.path || event.rawPath || '';
+    const method = event.httpMethod || (event.requestContext?.http?.method) || 'GET';
+    
+    console.log('PATH:', path);
+    console.log('METHOD:', method);
 
-app.post('/api/ai-query', async (req, res) => {
-    const { prompt } = req.body;
-    const userId = req.headers['x-user-id'];
-    const organizationId = req.headers['x-organization-id'];
+    // Add CORS headers to all responses
+    const headers = {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-user-id,x-organization-id",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+    };
 
-    if (!prompt || !userId || !organizationId) {
-        return res.status(400).json({ error: 'Missing prompt, x-user-id, or x-organization-id in request' });
+    // Handle OPTIONS requests (for CORS preflight)
+    if (method === 'OPTIONS') {
+        return {
+            statusCode: 200,
+            headers: headers,
+            body: ''
+        };
     }
 
-    try {
-        // 1. Fetch user's role and name from the database
-        const [users] = await dbPool.execute('SELECT role, first_name, last_name FROM Users WHERE user_id = ? AND organization_id = ?', [userId, organizationId]);
+    // Check for debug endpoint
+    if (path === '/debug' || path === '/api/debug' || path === '/Prod/debug' || path === '/debug/') {
+        return {
+            statusCode: 200,
+            headers: headers,
+            body: JSON.stringify({ message: "Success from simple handler on /debug" }),
+        };
+    }
 
-        if (users.length === 0) {
-            return res.status(403).json({ error: 'User not found or not part of this organization.' });
-        }
-        const userRole = users[0].role;
-        const userFullName = `${users[0].first_name} ${users[0].last_name}`;
-        
-        const systemPrompt = await getSystemPrompt(userRole);
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-        const fullPrompt = `User's question: "${prompt}"\nMy user_id is: "${userId}"\nMy full name is: "${userFullName}"\nMy organization_id is: "${organizationId}"\nMy role is: "${userRole}"`;
-
-        const result = await model.generateContent([systemPrompt, fullPrompt]);
-        const response = await result.response;
-        let responseText = response.text().trim();
-
-        // Robustly extract JSON from markdown block if present
-        const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
-        if (jsonMatch) {
-            responseText = jsonMatch[1].trim();
-        }
-
-        // The AI should now return JSON
-        let parsedResponse;
+    // Handle AI query endpoint
+    if (path === '/ai-query' || path === '/api/ai-query' || path === '/Prod/ai-query' || path === '/ai-query/') {
         try {
-            parsedResponse = JSON.parse(responseText);
-        } catch (e) {
-            console.error("Failed to parse JSON response from AI:", responseText);
-            return res.status(500).json({ error: "Received an invalid response from the AI model." });
+            // Get the request body
+            let body = {};
+            if (event.body) {
+                body = JSON.parse(event.body);
+            }
+            
+            const prompt = body.prompt;
+            const userId = event.headers['x-user-id'] || event.headers['X-User-Id'];
+            const organizationId = event.headers['x-organization-id'] || event.headers['X-Organization-Id'];
+
+            if (!prompt || !userId || !organizationId) {
+                return {
+                    statusCode: 400,
+                    headers: headers,
+                    body: JSON.stringify({ error: 'Missing prompt, x-user-id, or x-organization-id in request' })
+                };
+            }
+
+            // LAZY INITIALIZATION: Create clients on first request.
+            if (!dbPool) {
+                dbPool = mysql.createPool({
+                    host: process.env.DB_HOST,
+                    user: process.env.DB_USER,
+                    password: process.env.DB_PASSWORD,
+                    database: process.env.DB_NAME,
+                    port: process.env.DB_PORT,
+                    waitForConnections: true,
+                    connectionLimit: 10,
+                    queueLimit: 0
+                });
+            }
+
+            if (!genAI) {
+                if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "ENTER_YOUR_GEMINI_API_KEY") {
+                    throw new Error('GEMINI_API_KEY is not set. Please deploy again and provide the key when prompted.');
+                }
+                genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+            }
+
+            // 1. Fetch user's role and name from the database
+            const [users] = await dbPool.execute('SELECT role, first_name, last_name FROM Users WHERE user_id = ? AND organization_id = ?', [userId, organizationId]);
+
+            if (users.length === 0) {
+                return {
+                    statusCode: 403,
+                    headers: headers,
+                    body: JSON.stringify({ error: 'User not found or not part of this organization.' })
+                };
+            }
+            
+            const userRole = users[0].role;
+            const userFullName = `${users[0].first_name} ${users[0].last_name}`;
+            
+            const systemPrompt = await getSystemPrompt(userRole);
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+            const fullPrompt = `User's question: "${prompt}"\nMy user_id is: "${userId}"\nMy full name is: "${userFullName}"\nMy organization_id is: "${organizationId}"\nMy role is: "${userRole}"`;
+
+            const result = await model.generateContent([systemPrompt, fullPrompt]);
+            const response = await result.response;
+            let responseText = response.text().trim();
+
+            // Robustly extract JSON from markdown block if present
+            const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+            if (jsonMatch) {
+                responseText = jsonMatch[1].trim();
+            }
+
+            // The AI should now return JSON
+            let parsedResponse;
+            try {
+                parsedResponse = JSON.parse(responseText);
+            } catch (e) {
+                console.error("Failed to parse JSON response from AI:", responseText);
+                return {
+                    statusCode: 500,
+                    headers: headers,
+                    body: JSON.stringify({ error: "Received an invalid response from the AI model." })
+                };
+            }
+
+            let { sql: generatedSql, confirmation_message: confirmationMessage } = parsedResponse;
+            
+            console.log("Cleaned SQL:", generatedSql);
+
+            if (generatedSql.toUpperCase() === 'MULTI_ACTION_ERROR') {
+                return {
+                    statusCode: 400,
+                    headers: headers,
+                    body: JSON.stringify({ error: confirmationMessage || "The request involves multiple actions. Please send separate prompts." })
+                };
+            }
+
+            if (generatedSql.toUpperCase() === 'IRRELEVANT') {
+                return {
+                    statusCode: 400,
+                    headers: headers,
+                    body: JSON.stringify({ error: confirmationMessage || "This question is not relevant to HR data." })
+                };
+            }
+
+            if (generatedSql.toUpperCase() === 'ACCESS_DENIED') {
+                return {
+                    statusCode: 403,
+                    headers: headers,
+                    body: JSON.stringify({ error: confirmationMessage || "Access denied." })
+                };
+            }
+
+            if (generatedSql.toUpperCase() === 'AMBIGUOUS_QUERY') {
+                return {
+                    statusCode: 400,
+                    headers: headers,
+                    body: JSON.stringify({ error: confirmationMessage || "The query is ambiguous. Please provide more specific details." })
+                };
+            }
+
+            if (!isQuerySafe(generatedSql)) {
+                return {
+                    statusCode: 403,
+                    headers: headers,
+                    body: JSON.stringify({ error: 'Generated query is not allowed for security reasons.' })
+                };
+            }
+            
+            // Remove trailing semicolon if exists
+            if (generatedSql.endsWith(';')) {
+                generatedSql = generatedSql.slice(0, -1);
+            }
+
+            const [queryResult] = await dbPool.execute(generatedSql);
+
+            // For SELECT, result is an array of rows. For others, it's an info object.
+            if (Array.isArray(queryResult)) {
+                return {
+                    statusCode: 200,
+                    headers: headers,
+                    body: JSON.stringify({ success: true, message: confirmationMessage, data: queryResult })
+                };
+            }
+
+            return {
+                statusCode: 200,
+                headers: headers,
+                body: JSON.stringify({ success: true, message: confirmationMessage, details: queryResult })
+            };
+
+        } catch (error) {
+            console.error('Error processing AI query:', error);
+            return {
+                statusCode: 500,
+                headers: headers,
+                body: JSON.stringify({ 
+                    error: 'Failed to process AI query.', 
+                    details: error.message,
+                    stack: error.stack 
+                })
+            };
         }
-
-        let { sql: generatedSql, confirmation_message: confirmationMessage } = parsedResponse;
-        
-        console.log("Cleaned SQL:", generatedSql);
-
-        if (generatedSql.toUpperCase() === 'MULTI_ACTION_ERROR') {
-            return res.status(400).json({ error: confirmationMessage || "The request involves multiple actions. Please send separate prompts." });
-        }
-
-        if (generatedSql.toUpperCase() === 'IRRELEVANT') {
-            return res.status(400).json({ error: confirmationMessage || "This question is not relevant to HR data." });
-        }
-
-        // ... inside the app.post('/api/ai-query', ...) route
-
-        if (generatedSql.toUpperCase() === 'ACCESS_DENIED') {
-            return res.status(403).json({ error: confirmationMessage || "Access denied." });
-        }
-
-        // Add this new block
-        if (generatedSql.toUpperCase() === 'AMBIGUOUS_QUERY') {
-            return res.status(400).json({ error: confirmationMessage || "The query is ambiguous. Please provide more specific details." });
-        }
-
-
-
-        if (!isQuerySafe(generatedSql)) {
-            return res.status(403).json({ error: 'Generated query is not allowed for security reasons.' });
-        }
-        
-        // Remove trailing semicolon if exists
-        if (generatedSql.endsWith(';')) {
-            generatedSql = generatedSql.slice(0, -1);
-        }
-
-        const [queryResult] = await dbPool.execute(generatedSql);
-
-        // For SELECT, result is an array of rows. For others, it's an info object.
-        if (Array.isArray(queryResult)) {
-            res.json({ success: true, message: confirmationMessage, data: queryResult });
-            return;
-        }
-
-        res.json({ success: true, message: confirmationMessage, details: queryResult });
-
-    } catch (error) {
-        console.error('Error processing AI query:', error);
-        res.status(500).json({ error: 'Failed to process AI query.', details: error.message });
     }
-});
 
-app.get('/', (req, res) => {
-    res.send('AI Backend is running!');
-});
-
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-}); 
+    // Default response for any other path
+    return {
+        statusCode: 404,
+        headers: headers,
+        body: JSON.stringify({ 
+            message: "Not Found from simple handler",
+            path: path,
+            method: method
+        }),
+    };
+}; 

@@ -37,6 +37,10 @@ Thumbs.db
 .nuxt/
 .vercel/
 
+# AWS SAM
+.aws-sam/
+samconfig.toml
+
 # Misc
 .npm
 .pnp.*

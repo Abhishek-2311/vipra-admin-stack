@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM template for the vipra-admin-stack.
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+
+Resources:
+  VipraAdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: index.handler
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          DB_HOST: shortline.proxy.rlwy.net
+          DB_PORT: 49692
+          DB_NAME: railway
+          DB_USER: root
+          DB_PASSWORD: fwbmUuEstVNVheIibURuBIOhlveCVZjo
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
+          # IMPORTANT: You must provide your GEMINI_API_KEY.
+          # You can set it during the guided deployment by answering the prompt for 'GeminiApiKey'.
+          GEMINI_API_KEY: !Ref GeminiApiKey
+      Events:
+        ApiEvents:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+            RestApiId: !Ref VipraRestApi
+        ApiRoot:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+            RestApiId: !Ref VipraRestApi
+
+  VipraRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      EndpointConfiguration: REGIONAL
+    
+Parameters:
+  AllowedOrigins:
+    Type: String
+    Default: 'http://localhost:3000'
+    Description: Comma-separated list of allowed CORS origins.
+  GeminiApiKey:
+    Type: String
+    Default: ''
+    Description: API key for Google's Gemini AI service.
+    NoEcho: true
+
+Outputs:
+  VipraAdminApiEndpoint:
+    Description: "API Gateway endpoint URL for Vipra Admin function"
+    Value: !Sub "https://${VipraRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod" 
