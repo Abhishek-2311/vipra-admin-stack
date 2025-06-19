@@ -36,6 +36,7 @@ Thumbs.db
 .next/
 .nuxt/
 .vercel/
+.aws-sam/
 
 # Misc
 .npm

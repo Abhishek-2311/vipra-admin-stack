@@ -1,0 +1,35 @@
+# Development files
+.git
+.github
+.gitignore
+.env
+.env.*
+.npmignore
+.vscode
+.idea
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# AWS SAM files
+.aws-sam
+samconfig.toml
+template.yaml
+packaged.yaml
+
+# Test files
+test
+tests
+__tests__
+coverage
+
+# Documentation
+docs
+*.md
+!README.md
+
+# Other
+node_modules
+.DS_Store
+Thumbs.db 

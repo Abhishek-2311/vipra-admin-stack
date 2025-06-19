@@ -1,24 +1,11 @@
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
 const fs = require('fs').promises;
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const mysql = require('mysql2/promise');
 
 const app = express();
 app.use(express.json());
-
-const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
-const corsOptions = {
-    origin: (origin, callback) => {
-        if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-};
-app.use(cors(corsOptions));
 
 // Database connection pool
 const dbPool = mysql.createPool({
@@ -104,7 +91,7 @@ function isQuerySafe(sql) {
 
 // --- API Endpoints ---
 
-app.post('/api/ai-query', async (req, res) => {
+app.post('/ai-query', async (req, res) => {
     const { prompt } = req.body;
     const userId = req.headers['x-user-id'];
     const organizationId = req.headers['x-organization-id'];
@@ -179,7 +166,158 @@ app.get('/', (req, res) => {
     res.send('AI Backend is running!');
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-}); 
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    });
+}
+
+// For AWS Lambda
+exports.handler = async (event, context) => {
+    // Log the incoming event for debugging
+    console.log('Event:', JSON.stringify(event));
+
+    let response;
+
+    try {
+        // Parse the incoming request from API Gateway
+        const path = event.path;
+        const httpMethod = event.httpMethod;
+        const headers = event.headers || {};
+        let body = {};
+        
+        try {
+            if (event.body) {
+                body = JSON.parse(event.body);
+            }
+        } catch (error) {
+            console.error('Error parsing request body:', error);
+            // Even with a parse error, we should return a proper response
+            response = {
+                statusCode: 400,
+                body: JSON.stringify({ error: 'Invalid request body' })
+            };
+            return response; // Early exit
+        }
+        
+        // Route the request based on path and method
+        if (path === '/' && httpMethod === 'GET') {
+            // Health check endpoint
+            response = {
+                statusCode: 200,
+                body: 'AI Backend is running!'
+            };
+        } else if (path === '/ai-query' && httpMethod === 'POST') {
+            // AI query endpoint
+            const { prompt } = body;
+            const userId = headers['x-user-id'];
+            const organizationId = headers['x-organization-id'];
+            
+            if (!prompt || !userId || !organizationId) {
+                response = {
+                    statusCode: 400,
+                    body: JSON.stringify({ error: 'Missing prompt, x-user-id, or x-organization-id in request' }),
+                };
+            } else {
+                const systemPrompt = await getSystemPrompt();
+                const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+                
+                const fullPrompt = `User's question: "${prompt}"\nMy user_id is: "${userId}"\nMy organization_id is: "${organizationId}"`;
+                
+                const result = await model.generateContent([systemPrompt, fullPrompt]);
+                const aiResponse = await result.response;
+                let responseText = aiResponse.text().trim();
+                
+                // Robustly extract JSON from markdown block if present
+                const jsonMatch = responseText.match(/```(?:json)?\\s*([\\s\\S]+?)\\s*```/);
+                if (jsonMatch) {
+                    responseText = jsonMatch[1].trim();
+                }
+                
+                // Parse the AI's JSON response
+                let parsedResponse;
+                try {
+                    parsedResponse = JSON.parse(responseText);
+                } catch (e) {
+                    console.error("Failed to parse JSON response from AI:", responseText);
+                    response = {
+                        statusCode: 500,
+                        body: JSON.stringify({ error: "Received an invalid response from the AI model." }),
+                    };
+                }
+
+                if (response) { // If parsing failed, we already set the response
+                    // do nothing
+                } else {
+                    let { sql: generatedSql, confirmation_message: confirmationMessage } = parsedResponse;
+                
+                    console.log("Cleaned SQL:", generatedSql);
+                    
+                    if (generatedSql.toUpperCase() === 'MULTI_ACTION_ERROR') {
+                        response = {
+                            statusCode: 400,
+                            body: JSON.stringify({ error: confirmationMessage || "The request involves multiple actions. Please send separate prompts." }),
+                        };
+                    } else if (generatedSql.toUpperCase() === 'IRRELEVANT') {
+                        response = {
+                            statusCode: 400,
+                            body: JSON.stringify({ error: confirmationMessage || "This question is not relevant to HR data." }),
+                        };
+                    } else if (!isQuerySafe(generatedSql)) {
+                        response = {
+                            statusCode: 403,
+                            body: JSON.stringify({ error: 'Generated query is not allowed for security reasons.' }),
+                        };
+                    } else {
+                        // Remove trailing semicolon if exists
+                        if (generatedSql.endsWith(';')) {
+                            generatedSql = generatedSql.slice(0, -1);
+                        }
+                        
+                        const [queryResult] = await dbPool.execute(generatedSql);
+                        
+                        const responseBody = {
+                            success: true,
+                            message: confirmationMessage,
+                            data: Array.isArray(queryResult) ? queryResult : undefined,
+                            details: !Array.isArray(queryResult) ? queryResult : undefined,
+                        };
+
+                        response = {
+                            statusCode: 200,
+                            body: JSON.stringify(responseBody),
+                        };
+                    }
+                }
+            }
+        } else {
+            // Route not found
+            response = {
+                statusCode: 404,
+                body: JSON.stringify({ error: 'Not found' }),
+            };
+        }
+    } catch (error) {
+        console.error('Error processing request:', error);
+        response = {
+            statusCode: 500,
+            body: JSON.stringify({ error: 'Failed to process request', details: error.message }),
+        };
+    } finally {
+        // Ensure headers are always added
+        if (!response) {
+            // Fallback for unexpected exit
+            response = { statusCode: 500, body: JSON.stringify({ error: 'An unexpected server error occurred.' }) };
+        }
+        response.headers = {
+            ...response.headers,
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        };
+    }
+    
+    // Return the final response
+    return response;
+}; 

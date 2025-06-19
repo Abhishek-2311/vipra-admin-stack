@@ -1,0 +1,10 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "vipra-hr-assistant"
+resolve_s3 = true
+s3_prefix = "vipra-hr-assistant"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=\"prod\" DBHost=\"shortline.proxy.rlwy.net\" DBPort=\"49692\" DBName=\"railway\" DBUser=\"root\" DBPassword=\"fwbmUuEstVNVheIibURuBIOhlveCVZjo\" JWTSecret=\"aVeryLongAndRandomSecretKeyForYourApp\" GeminiAPIKey=\"AIzaSyBnsEqf_xoCAaxrxvu7Qmrp2_LIDkTrHi8\""
+image_repositories = []

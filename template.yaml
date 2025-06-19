@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  VIPRA HR Assistant API
+  SAM Template for deploying the HR AI Assistant backend
+
+# Parameters that can be overridden at deployment time
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name (dev, staging, prod)
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  DBHost:
+    Type: String
+    Default: shortline.proxy.rlwy.net
+    Description: Database host
+  
+  DBPort:
+    Type: String
+    Default: 49692
+    Description: Database port
+  
+  DBName:
+    Type: String
+    Default: railway
+    Description: Database name
+  
+  DBUser:
+    Type: String
+    Default: root
+    Description: Database user
+  
+  DBPassword:
+    Type: String
+    Default: fwbmUuEstVNVheIibURuBIOhlveCVZjo
+    Description: Database password
+    NoEcho: true
+  
+  JWTSecret:
+    Type: String
+    Default: aVeryLongAndRandomSecretKeyForYourApp
+    Description: JWT Secret for authentication
+    NoEcho: true
+  
+  GeminiAPIKey:
+    Type: String
+    Description: Google Gemini API Key
+    NoEcho: true
+
+# Global values that apply to all resources
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        NODE_ENV: !Ref Environment
+        DB_HOST: !Ref DBHost
+        DB_PORT: !Ref DBPort
+        DB_NAME: !Ref DBName
+        DB_USER: !Ref DBUser
+        DB_PASSWORD: !Ref DBPassword
+        JWT_SECRET: !Ref JWTSecret
+        GEMINI_API_KEY: !Ref GeminiAPIKey
+        ALLOWED_ORIGINS: '*'
+
+Resources:
+  # Lambda function for the HR AI Assistant
+  # The API Gateway is created implicitly by the 'Api' event types below
+  HRAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Architectures:
+        - x86_64
+      Events:
+        # API Gateway event for the AI query endpoint
+        AIQuery:
+          Type: Api
+          Properties:
+            Path: /ai-query
+            Method: post
+        # API Gateway event for the health check endpoint
+        HealthCheck:
+          Type: Api
+          Properties:
+            Path: /
+            Method: get
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+Outputs:
+  # URL of the deployed API
+  HRAssistantApi:
+    Description: "API Gateway endpoint URL for HR Assistant"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  
+  # ARN of the Lambda function
+  HRAssistantFunction:
+    Description: "HR Assistant Lambda Function ARN"
+    Value: !GetAtt HRAssistantFunction.Arn 

@@ -1,0 +1,139 @@
+
+# VIPRA HR Assistant API Documentation
+
+This document provides a high-level overview of the VIPRA HR Assistant API, its endpoints, and how to interact with it.
+
+---
+
+## Base URL
+
+All API endpoints are relative to the following base URL, which is created upon successful deployment with AWS SAM:
+
+`https://{api_id}.execute-api.{region}.amazonaws.com/Prod/`
+
+Replace `{api_id}` and `{region}` with the values from your deployment output. For the most recent deployment, the base URL is:
+**`https://9qgityvc65.execute-api.ap-south-1.amazonaws.com/Prod/`**
+
+---
+
+## Authentication
+
+The API uses a custom header-based authentication mechanism. All requests to secure endpoints must include the following HTTP headers:
+
+-   `x-user-id`: The unique identifier for the user making the request.
+-   `x-organization-id`: The unique identifier for the organization the user belongs to.
+
+These headers provide the necessary context for the AI to retrieve user-specific and company-specific information.
+
+---
+
+## Endpoints
+
+The API exposes two primary endpoints.
+
+### 1. Health Check
+
+A simple endpoint to verify that the API is running and accessible.
+
+-   **URL:** `/`
+-   **Method:** `GET`
+-   **Description:** Returns a simple success message indicating the service is operational.
+-   **Headers:** None required.
+-   **Success Response (200 OK):**
+    -   **Content-Type:** `text/plain`
+    -   **Body:** `AI Backend is running!`
+
+### 2. AI Query Endpoint
+
+This is the core endpoint of the application. It accepts a natural language query, converts it to a SQL query, executes it against the HR database, and returns a user-friendly response.
+
+-   **URL:** `/ai-query`
+-   **Method:** `POST`
+-   **Description:** Processes a natural language prompt to perform actions or retrieve information from the HR database.
+-   **Headers:**
+    -   `Content-Type`: `application/json`
+    -   `x-user-id`: `1` (Example)
+    -   `x-organization-id`: `1` (Example)
+-   **Request Body:**
+    The request body must be a JSON object with a single key, `prompt`.
+    ```json
+    {
+        "prompt": "Your natural language question here"
+    }
+    ```
+
+#### AI Capabilities & Example Prompts
+
+The AI can answer questions and perform updates related to the following HR domains based on the database schema:
+-   **Personal Information:** "What is my role?", "Who is my manager?"
+-   **Leave Management:** "What is my sick leave balance?", "How many leaves do I have left?"
+-   **Company Policies:** "What is the work from home policy?"
+-   **Payroll & Compensation:** "What is my base salary?", "How much is my PF deduction?"
+-   **Data Updates:** "Update my location to 'New York'", "Set Rahul Verma's base salary to 60000"
+
+#### Success Response (200 OK)
+
+A successful response contains a confirmation message and the data retrieved or details of the update.
+
+-   **For Data Retrieval (SELECT queries):**
+    ```json
+    {
+        "success": true,
+        "message": "Found the leave balance for Rahul Verma.",
+        "data": [
+            {
+                "leave_balance": 15
+            }
+        ]
+    }
+    ```
+-   **For Data Updates (UPDATE/INSERT queries):**
+    ```json
+    {
+        "success": true,
+        "message": "Rahul Verma's base salary has been updated to 60000.",
+        "details": {
+            "fieldCount": 0,
+            "affectedRows": 1,
+            "insertId": 0,
+            "info": "Rows matched: 1  Changed: 1  Warnings: 0",
+            "serverStatus": 2,
+            "warningStatus": 0,
+            "changedRows": 1
+        }
+    }
+    ```
+
+#### Error Responses
+
+-   **Bad Request (400):** Missing headers or prompt.
+    ```json
+    {
+        "error": "Missing prompt, x-user-id, or x-organization-id in request"
+    }
+    ```
+-   **Multi-Action Error (400):** The AI detected a prompt asking for multiple distinct actions.
+    ```json
+    {
+        "error": "Your request involves multiple actions. Please separate them into individual prompts for clarity and reliability."
+    }
+    ```
+-   **Irrelevant Query (400):** The prompt was not related to HR topics.
+    ```json
+    {
+        "error": "I am an HR assistant for Vipraco and can only answer questions about employee data, leave, payroll, and company policies. How can I help you with an HR-related query?"
+    }
+    ```
+-   **Forbidden Query (403):** The AI generated a disallowed SQL command (e.g., `DELETE`, `DROP`).
+    ```json
+    {
+        "error": "Generated query is not allowed for security reasons."
+    }
+    ```
+-   **Internal Server Error (500):** A general server-side error occurred.
+    ```json
+    {
+        "error": "Failed to process request",
+        "details": "Specific error message here"
+    }
+    ```

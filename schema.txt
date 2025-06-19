@@ -83,4 +83,4 @@ states
  ctc DECIMAL(10, 2) NOT NULL, -- Cost to Company
  FOREIGN KEY (organization_id) REFERENCES
 Organizations(organization_id),
- FOREIGN KEY (user_id) REFERENCES Users(user_id
+ FOREIGN KEY (user_id) REFERENCES Users(user_id)
