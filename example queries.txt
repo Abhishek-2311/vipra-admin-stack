@@ -1,0 +1,25 @@
+Personal Information & Profile
+1. "What is my employee ID?"
+2. "What is my current role/designation?"
+3. "Who is my manager?"
+4. "What is my official email address?"
+5. "When did I join the company?"
+6. "Which department am I in?"
+
+Leave Management
+7. "How many casual leaves do I have left?"
+8. "What is my earned leave balance?"
+9. "How many sick leaves have I taken?"
+10."How many leaves are pending approval for me?"
+Company Policies & HR Information
+11. "What is the company's work-from-home policy?"
+12."What is the travel and expense policy?"
+13."When is the next company holiday?" (Specific to their organization and location)
+14."What are the safety regulations for factory employees?"
+15."Can you tell me about the attendance policy?"
+Payroll & Compensation
+16."What is my current base salary?"
+17."What is my CTC?"
+18."How much is my PF deduction?"
+19."What is my HRA component?"
+20."How much professional tax is deducted from my salary?"

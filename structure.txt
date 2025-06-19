@@ -1,0 +1,133 @@
+Complete Request Format for the Admin Stack
+Let's assume the frontend is making a POST request to find all leave requests for a specific user. The frontend would call your router at POST /api/admin/leave-requests.
+
+The Admin Stack will receive the following:
+
+1. Request Headers
+These are the most important part. The Admin Stack should read the user and organization ID from these headers.
+
+json
+{
+  "Content-Type": "application/json",
+  "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...", // The original JWT (can be ignored by the backend)
+  "x-user-id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",     // <-- The Admin user's ID
+  "x-organization-id": "org_12345",                        // <-- The Admin's Organization ID
+  "x-forwarded-by": "router-service",
+  "x-forwarded-for": "192.0.2.1",                          // The original user's IP address
+  "Accept": "/",
+  "Host": "your-admin-backend-url.com",
+  "Connection": "keep-alive"
+}
+2. Request Body (JSON)
+This is the JSON payload that the frontend originally sent to the router. It is passed through unchanged.
+
+json
+{
+  "targetUserId": "user_xyz_789",
+  "status": "pending",
+  "limit": 50
+}
+How the Admin Stack Developer Should Use This
+The developer building the Admin Stack should structure their code to:
+
+Read the Headers: In a Node.js/Express backend, they can get the user's ID and organization ID like this:
+javascript
+const adminUserId = req.headers['x-user-id'];
+const organizationId = req.headers['x-organization-id'];
+Read the Body: They can get the payload from the request body as usual:
+javascript
+const { targetUserId, status, limit } = req.body;
+This gives them all the information they need: who is making the request (adminUserId, organizationId) and what they are asking for (targetUserId, status, limit).
+
+Feedback submitted
+Me
+
+how do i test the what i am sending to the admin stack in postman
+
+Revert
+Thought Process
+
+
+
+
+
+
+
+
+
+
+
+
+That's an excellent and important question. Since the Admin Stack is on another machine, you can't see the request it receives. The best way to test this is to temporarily point your router to a "request inspector" service that will show you the exact contents of any request it receives.
+
+The easiest tool for this is Webhook.site. It's free and requires no sign-up.
+
+Here is the step-by-step guide to test what you're sending to the Admin Stack using Postman and Webhook.site.
+
+Step 1: Get Your Request Inspector URL
+Open a new browser tab and go to https://webhook.site/.
+The site will instantly generate a unique URL for you. It will look something like this: https://webhook.site/#!/a1b2c3d4-e5f6-7890-1234-567890abcdef
+Copy the URL from the "Your unique URL" box on the right. It will be in the format https://webhook.site/a1b2c3d4-e5f6-7890-1234-567890abcdef.
+Step 2: Update Your SAM Template
+Now, you need to tell your router to send requests to this new URL instead of the real Admin backend.
+
+Open your 
+d:/hackthework/router-service/template.yaml
+ file.
+Find the AdminBackendUrl parameter definition (around line 29).
+Change the Default value to your new Webhook.site URL. Make sure to keep the quotes.
+yaml
+# Around line 29
+AdminBackendUrl:
+  Type: String
+  Default: "https://webhook.site/YOUR_UNIQUE_ID_HERE" # <-- PASTE YOUR URL HERE
+Step 3: Redeploy Your Service
+You need to deploy this small change. Since you have a samconfig.toml file now, this is very simple.
+
+Open your terminal in the d:/hackthework/router-service directory.
+Run sam build.
+After the build is complete, run sam deploy. (You do not need --guided anymore).
+Step 4: Test with Postman (as an Admin)
+This is the crucial part. You must make a request as a user with the Admin role to trigger the correct routing logic.
+
+Register an Admin User:
+Method: POST
+URL: https://tluy8f133b.execute-api.us-east-1.amazonaws.com/Prod/api/auth/register
+Body (raw, JSON):
+json
+{
+    "email": "test.admin@example.com",
+    "password": "a-strong-password",
+    "role": "Admin", // <-- Use "Admin" role
+    "organization_id": "org_12345"
+}
+Click Send.
+Log In as the Admin:
+Method: POST
+URL: https://tluy8f133b.execute-api.us-east-1.amazonaws.com/Prod/api/auth/login
+Body (raw, JSON):
+json
+{
+    "email": "test.admin@example.com",
+    "password": "a-strong-password"
+}
+Click Send and copy the JWT token from the response.
+Make the Test Request:
+Method: POST
+URL: https://tluy8f133b.execute-api.us-east-1.amazonaws.com/Prod/api/admin/some-action (The path after /api/ doesn't matter for this test).
+Authorization: Set Type to Bearer Token and paste the admin's JWT token.
+Body (raw, JSON):
+json
+{
+    "action": "get-all-users",
+    "filter": "active"
+}
+Click Send.
+Step 5: Check the Result on Webhook.site
+Now, go back to the Webhook.site browser tab. You will see that a new request has appeared on the left. Click on it.
+
+You can now inspect everything that your router sent:
+
+Headers: You will see the x-user-id, x-organization-id, and all other headers.
+Body: You will see the raw JSON body: { "action": "get-all-users", "filter": "active" }.
+This gives you undeniable proof of the exact data format your Admin Stack will receive. You can screenshot this page and send it to the other developer.

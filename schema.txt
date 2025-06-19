@@ -1,0 +1,86 @@
+Table 1: Organizations (Master table for tenants)
+-- Stores details of each client organization.
+CREATE TABLE Organizations (
+ organization_id VARCHAR(50) PRIMARY KEY, -- Unique ID for
+each client organization
+ org_name VARCHAR(255) NOT NULL,
+ subscription_plan VARCHAR(50), -- e.g., 'Enterprise',
+'Standard', 'Basic'
+ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- Table 2: Users (Employee Master Data)
+-- Stores core employee information. user_id and manager_id reference this table.
+-- password_hash should store securely hashed passwords (e.g., using bcrypt).
+
+CREATE TABLE Users (
+ user_id VARCHAR(50) PRIMARY KEY,
+ organization_id VARCHAR(50) NOT NULL,
+ first_name VARCHAR(100) NOT NULL,
+ last_name VARCHAR(100) NOT NULL,
+ email VARCHAR(255) UNIQUE NOT NULL,
+ password_hash VARCHAR(255) NOT NULL, -- Store hashed
+passwords, not plain text!
+ role VARCHAR(100) NOT NULL, -- e.g., 'Employee', 'Manager',
+'Admin'
+ manager_id VARCHAR(50), -- Self-referencing FK to
+Users.user_id (can be NULL for top managers)
+ date_of_joining DATE NOT NULL,
+ department VARCHAR(100),
+ location VARCHAR(100),
+ FOREIGN KEY (organization_id) REFERENCES
+Organizations(organization_id),
+ FOREIGN KEY (manager_id) REFERENCES Users(user_id)
+);
+-- Table 3: LeaveBalances
+-- Stores current leave balances for each employee.
+CREATE TABLE LeaveBalances (
+ balance_id SERIAL PRIMARY KEY, -- Auto-incrementing unique
+ID for this record
+ organization_id VARCHAR(50) NOT NULL,
+ user_id VARCHAR(50) NOT NULL,
+ leave_type VARCHAR(50) NOT NULL, -- e.g., 'Casual Leave',
+'Sick Leave', 'Earned Leave'
+ total_allotted INT NOT NULL,
+ leaves_taken INT NOT NULL DEFAULT 0,
+ leaves_pending_approval INT NOT NULL DEFAULT 0,
+ last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY (organization_id) REFERENCES
+Organizations(organization_id),
+ FOREIGN KEY (user_id) REFERENCES Users(user_id)
+)
+
+Table 4: CompanyPolicies (Knowledge Base)
+-- Stores key company policies and FAQs, accessible by the VipraCo.
+CREATE TABLE CompanyPolicies (
+ policy_id SERIAL PRIMARY KEY,
+ organization_id VARCHAR(50) NOT NULL,
+ policy_title VARCHAR(255) NOT NULL,
+ policy_category VARCHAR(100), -- e.g., 'Leave', 'Expense',
+'IT', 'HR General'
+ policy_content TEXT NOT NULL, -- The actual text of the
+policy/FAQ
+ last_reviewed DATE,
+ keywords TEXT, -- Comma-separated keywords for faster
+search/embedding (for hackathon)
+ FOREIGN KEY (organization_id) REFERENCES
+Organizations(organization_id)
+);
+-- Table 5: PayrollData (Simplified for this project)
+-- Stores basic current payroll information for each employee.
+-- In a real system, this would be linked to payroll processing cycles.
+CREATE TABLE PayrollData (
+ payroll_id SERIAL PRIMARY KEY,
+ organization_id VARCHAR(50) NOT NULL,
+ user_id VARCHAR(50) NOT NULL,
+ base_salary DECIMAL(10, 2) NOT NULL,
+ HRA DECIMAL(10, 2), -- House Rent Allowance
+ conveyance_allowance DECIMAL(10, 2),
+ medical_allowance DECIMAL(10, 2),
+ pf_deduction DECIMAL(10, 2), -- Provident Fund
+ esi_deduction DECIMAL(10, 2), -- Employee State Insurance
+ professional_tax DECIMAL(10, 2), -- Specific to Indian
+states
+ ctc DECIMAL(10, 2) NOT NULL, -- Cost to Company
+ FOREIGN KEY (organization_id) REFERENCES
+Organizations(organization_id),
+ FOREIGN KEY (user_id) REFERENCES Users(user_id

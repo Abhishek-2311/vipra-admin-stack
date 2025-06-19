@@ -1,0 +1,164 @@
+Alright team, assemble! 🧑‍💻🚀 You're building a multi-stack smart HR assistant with role-based routing and AI, and you’ve got Cursor + AI agents backing you. Here's a set of **detailed, role-specific prompts** for your squad, optimized for high-speed, hackathon-style dev—clean, modular, and built for deployment.
+
+---
+
+## 🧱 Architecture Overview
+
+* **Frontend** (React + Vercel): Handles UI, role-based login, token handling, and routing requests to router backend.
+* **Router Stack** (Node.js + Express on AWS Lambda): Receives all API calls, inspects JWT for role/org, and forwards requests to either the user or admin backend.
+* **Admin Stack** (Node.js + Express on AWS Lambda): Provides admin endpoints (view leave data, update company policy, manage users, etc.).
+* **User Stack** (Node.js + Express on AWS Lambda): Provides employee-facing endpoints (check leave balance, salary breakdown, apply for leave, etc.).
+* **Database**: Shared MySQL (Railway) with multitenancy via `organization_id`.
+* **Auth**: Supabase Auth + JWT.
+* **AI**: NLP logic in user/admin backend to handle queries via OpenAI/Gemini.
+
+---
+
+# 🔮 1. Frontend Developer Prompt (React + Vercel)
+
+### Prompt for Cursor/AI:
+
+> Build a **React-based frontend** (deployed on Vercel) for a multi-tenant HR assistant. It must:
+>
+> 1. Support **login/signup with Supabase Auth** (email/password + Google).
+> 2. Store JWT securely in local storage or cookies.
+> 3. After login, **decode JWT** and extract:
+>
+>    * `role` (either `admin` or `employee`)
+>    * `organization_id`
+> 4. All API requests should be made to the **router backend**, attaching the `Authorization: Bearer <token>` header.
+> 5. After login, redirect to:
+>
+>    * `/dashboard/admin` for admins
+>    * `/dashboard/user` for employees
+> 6. Dashboard should have pages for:
+>
+>    * Viewing/updating leave balance
+>    * Viewing salary/payroll info
+>    * Chat with the AI assistant (use text input for now)
+>
+> Tech:
+>
+> * React + Vite or Next.js (App Router)
+> * TailwindCSS
+> * Axios or fetch for API
+> * JWT decode with `jwt-decode`
+> * Deploy to Vercel
+
+---
+
+# 🛣️ 2. Router Stack Prompt (Node.js + Express + AWS Lambda)
+
+### Prompt for Cursor/AI:
+
+> Build a **Node.js Express backend** deployed as an **AWS Lambda**. This router acts as a middleman between the frontend and backend services (admin/user).
+>
+> Responsibilities:
+>
+> 1. **Receive all API calls from frontend**.
+> 2. **Validate the JWT** using Supabase's JWT secret.
+> 3. Extract user role (`admin` or `employee`) and `organization_id`.
+> 4. Based on the role:
+>
+>    * Forward the request to either the **Admin backend** or **User backend**.
+>    * Use the original request body and headers.
+> 5. Example routing logic:
+>
+> ```js
+> if (role === 'admin') {
+>   forward to: https://admin-backend-url.aws/api/...
+> } else {
+>   forward to: https://user-backend-url.aws/api/...
+> }
+> ```
+>
+> 6. Log routing events for debugging.
+>
+> Tech:
+>
+> * Node.js + Express
+> * Middleware to decode JWT
+> * Axios for proxy forwarding
+> * AWS Lambda via Serverless Framework
+
+---
+
+# 🧑‍💼 3. Admin Stack Prompt (Node.js + Express + AWS Lambda)
+
+### Prompt for Cursor/AI:
+
+> Build a **Node.js Express backend** for the **Admin Panel**, deployed as **AWS Lambda**.
+>
+> This API stack must:
+>
+> 1. **Validate incoming JWTs** using Supabase secret.
+> 2. Filter data using `organization_id` to support multitenancy.
+> 3. Endpoints:
+>
+>    * `GET /admin/users`: list all users in the org
+>    * `GET /admin/leave-balances`: fetch leave balances
+>    * `POST /admin/company-policy`: update or create policy
+>    * `GET /admin/payroll`: fetch all salary breakdowns
+>    * `POST /admin/ai-query`: send AI prompt for analysis (use OpenAI/Gemini)
+> 4. Return clean JSON responses.
+>
+> Tech:
+>
+> * Node.js + Express
+> * MySQL (Railway) with Sequelize ORM
+> * JWT validation middleware
+> * Optional: Langchain for AI endpoint
+
+---
+
+# 👨‍🎓 4. User Stack Prompt (Node.js + Express + AWS Lambda)
+
+### Prompt for Cursor/AI:
+
+> Build a **Node.js Express backend** for the **Employee/User assistant**, deployed on **AWS Lambda**.
+>
+> The backend must:
+>
+> 1. Validate JWTs and extract `user_id` and `organization_id`.
+> 2. Endpoints:
+>
+>    * `GET /user/leave-balance`: check personal leave balance
+>    * `GET /user/payroll`: view own salary breakdown
+>    * `POST /user/leave-apply`: apply for leave
+>    * `POST /user/ai-query`: NLP endpoint to interpret HR-related questions
+> 3. In the `ai-query` endpoint:
+>
+>    * Parse user queries like “How many leaves do I have left?” or “What’s my salary?”
+>    * Extract intent and call relevant DB endpoints.
+>
+> Tech:
+>
+> * Node.js + Express
+> * Sequelize with MySQL
+> * AI integration (Gemini/OpenAI)
+> * JWT-based auth middleware
+
+---
+
+### 🔗 Shared Schema Overview (MySQL on Railway):
+
+```sql
+Organizations(id, name)
+Users(id, email, role, organization_id)
+LeaveBalances(id, user_id, total_leaves, used_leaves)
+CompanyPolicies(id, organization_id, policy_text)
+PayrollData(id, user_id, basic_salary, hra, deductions)
+```
+
+---
+
+### 🔥 Bonus Tips
+
+* Use environment variables for DB secrets, JWT secret, and AI API keys.
+* Use `cors` in all backends to allow requests from frontend origin.
+* Deploy frontend on Vercel (`vercel --prod`), backend stacks on AWS Lambda via Serverless framework.
+* Cursor + GPT agents can help scaffold boilerplate fast. Focus on writing middleware, role-based logic, and forwarding clean requests.
+
+---
+
+Want me to generate starter templates for each part too? Or a shared `.env.example`? I can whip those up like AI espresso shots ☕💻

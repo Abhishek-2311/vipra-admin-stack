@@ -1,0 +1,17 @@
+Sample Data for Organizations
+INSERT INTO Organizations (organization_id, org_name,
+subscription_plan) VALUES
+('TECHCORP_IN', 'TechCorp Innovations Pvt. Ltd.', ''Basic''),
+('MGFAB_GLOBAL', 'Muzaffarpur Global Fabricators', 'Standard'),
+('EDU_INST', 'BMS Education Institute', ‘Enterprise’);
+-- Sample Data for Users
+-- TechCorp Innovations (organization_id: TECHCORP_IN)
+INSERT INTO Users (user_id, organization_id, first_name,
+last_name, email, password_hash, role, manager_id,
+date_of_joining, department, location) VALUES
+('TCI_MGR001', 'TECHCORP_IN', 'Ananya', 'Sharma',
+'ananya.sharma@techcorp.com', 'hashed_pass_ananya', 'Manager',
+NULL, '2020-01-15', 'Engineering', 'Bangalore'),
+('TCI_EMP002', 'TECHCORP_IN', 'Rahul', 'Verma',
+'rahul.verma@techcorp.com', 'hashed_pass_rahul', 'Employee',
+'TCI_MGR001', '2021-03-10', 'Engineering', 'Bangalore'),
