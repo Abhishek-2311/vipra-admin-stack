@@ -11,15 +11,24 @@ Leave Management
 8. "What is my earned leave balance?"
 9. "How many sick leaves have I taken?"
 10."How many leaves are pending approval for me?"
+
+Admin Leave Management
+11. "Show all pending leave requests"
+12. "Show me leave requests waiting for approval"
+13. "Approve Rahul's earned leave request"
+14. "Reject Amit's leave request"
+15. "How many employees have pending leave requests?"
+
 Company Policies & HR Information
-11. "What is the company's work-from-home policy?"
-12."What is the travel and expense policy?"
-13."When is the next company holiday?" (Specific to their organization and location)
-14."What are the safety regulations for factory employees?"
-15."Can you tell me about the attendance policy?"
+16. "What is the company's work-from-home policy?"
+17."What is the travel and expense policy?"
+18."When is the next company holiday?" (Specific to their organization and location)
+19."What are the safety regulations for factory employees?"
+20."Can you tell me about the attendance policy?"
+
 Payroll & Compensation
-16."What is my current base salary?"
-17."What is my CTC?"
-18."How much is my PF deduction?"
-19."What is my HRA component?"
-20."How much professional tax is deducted from my salary?"
+21."What is my current base salary?"
+22."What is my CTC?"
+23."How much is my PF deduction?"
+24."What is my HRA component?"
+25."How much professional tax is deducted from my salary?"

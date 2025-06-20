@@ -48,6 +48,8 @@ Your entire output MUST be a single JSON object. This object must have two keys:
 7.  **MySQL Syntax**: Use correct MySQL syntax for joins. For UPDATE queries with joins, use "UPDATE table1 INNER JOIN table2 ON table1.col = table2.col SET table1.col = value WHERE conditions". Do NOT use "UPDATE table1 SET col = value FROM table2" as this syntax is not supported in MySQL.
 8.  **Required Fields**: When inserting data, always include ALL required fields. For PayrollData, you must include: organization_id, user_id, base_salary, and ctc. For example, when inserting salary data, always calculate and include the ctc (Cost to Company) value.
 9.  **Prefer Update Over Insert**: For salary operations, prefer UPDATE over INSERT if the record likely exists. Only use INSERT when explicitly told to create a new record.
+10. **STRICT Organization Access Control**: Users can ONLY access data from their own organization. ALWAYS include the organization_id in WHERE clauses for all queries. The organization_id will be provided in the prompt context. NEVER generate a query that could access data from other organizations. If a user asks about someone from another organization (like asking about "Geeta" when they're from TECHCORP_IN), set the "sql" value to "CROSS_ORG_ACCESS" and set the "confirmation_message" to "You don't have permission to access information about employees from other organizations."
+11. **Leave Approval for Admins**: Admins can view all pending leave requests within their organization and approve or reject them. When approving a leave, update the leaves_taken count and reset the leaves_pending_approval to 0. When rejecting a leave, just reset the leaves_pending_approval to 0 without changing leaves_taken.
 
 **Database Schema:**
 ---
@@ -76,6 +78,24 @@ ${exampleQueries}
 
 4. Query: "Create a new salary record for Ananya with base salary 30000"
    SQL: "INSERT INTO PayrollData (organization_id, user_id, base_salary, HRA, conveyance_allowance, medical_allowance, pf_deduction, esi_deduction, professional_tax, ctc) SELECT 'TECHCORP_IN', user_id, 30000, 15000, 3000, 1000, 3600, 0, 200, 55000 FROM Users WHERE first_name = 'Ananya' AND organization_id = 'TECHCORP_IN'"
+
+5. Query: "Show me all employees"
+   SQL: "SELECT * FROM Users WHERE organization_id = 'TECHCORP_IN'"
+   
+6. Query: "What is Geeta's user ID?" (when asked by TECHCORP_IN admin)
+   Response: "CROSS_ORG_ACCESS" with message "You don't have permission to access information about employees from other organizations."
+
+7. Query: "Show me all pending leave requests"
+   SQL: "SELECT u.user_id, u.first_name, u.last_name, u.department, lb.leave_type, lb.leaves_pending_approval FROM LeaveBalances lb INNER JOIN Users u ON lb.user_id = u.user_id WHERE lb.leaves_pending_approval > 0 AND lb.organization_id = 'TECHCORP_IN' ORDER BY u.department, u.first_name"
+
+8. Query: "Show leave requests for approval"
+   SQL: "SELECT u.user_id, u.first_name, u.last_name, u.department, lb.leave_type, lb.leaves_pending_approval FROM LeaveBalances lb INNER JOIN Users u ON lb.user_id = u.user_id WHERE lb.leaves_pending_approval > 0 AND lb.organization_id = 'TECHCORP_IN' ORDER BY u.department, u.first_name"
+
+9. Query: "Approve Rahul's earned leave"
+   SQL: "UPDATE LeaveBalances lb INNER JOIN Users u ON lb.user_id = u.user_id SET lb.leaves_taken = lb.leaves_taken + lb.leaves_pending_approval, lb.leaves_pending_approval = 0, lb.last_updated = NOW() WHERE u.first_name = 'Rahul' AND lb.leave_type = 'Earned Leave' AND u.organization_id = 'TECHCORP_IN'"
+
+10. Query: "Reject leave request for Amit"
+    SQL: "UPDATE LeaveBalances lb INNER JOIN Users u ON lb.user_id = u.user_id SET lb.leaves_pending_approval = 0, lb.last_updated = NOW() WHERE u.first_name = 'Amit' AND lb.leaves_pending_approval > 0 AND u.organization_id = 'TECHCORP_IN'"
 `;
     } catch (error) {
         console.error("Error reading context files:", error);
@@ -151,6 +171,46 @@ function fixSqlSyntax(sql) {
     return fixedSql;
 }
 
+// Function to check if a query is trying to access data from another organization
+async function validateCrossOrgAccess(sql, organizationId) {
+    // Check if the query contains a name filter
+    const nameRegex = /first_name\s*=\s*['"]([^'"]+)['"]/i;
+    const nameMatch = sql.match(nameRegex);
+    
+    if (!nameMatch) {
+        // No specific name in the query, so no cross-org validation needed
+        return { valid: true };
+    }
+    
+    const firstName = nameMatch[1];
+    
+    // Query to check if this user exists in a different organization
+    const checkQuery = `
+        SELECT organization_id FROM Users 
+        WHERE first_name = ? 
+        AND organization_id != ?
+    `;
+    
+    try {
+        const [results] = await dbPool.execute(checkQuery, [firstName, organizationId]);
+        
+        if (results.length > 0) {
+            // Found a user with this name in another organization
+            return {
+                valid: false,
+                message: `You don't have access to information about '${firstName}' as they belong to a different organization.`
+            };
+        }
+        
+        // User either doesn't exist or is in the current organization
+        return { valid: true };
+    } catch (error) {
+        console.error('Error validating cross-organization access:', error);
+        // In case of error, we'll default to allow the query
+        return { valid: true };
+    }
+}
+
 // Helper function to handle database errors and provide user-friendly messages
 function handleDatabaseError(error, sql) {
     console.error('Database error:', error);
@@ -205,6 +265,143 @@ function handleDatabaseError(error, sql) {
     }
     
     return errorResponse;
+}
+
+// Function to enforce organization-level access control
+function enforceOrganizationAccess(sql, organizationId) {
+    // Convert SQL to uppercase for case-insensitive checks
+    const upperSql = sql.toUpperCase();
+    
+    // Check if this is a query that needs organization restriction
+    const isSelect = upperSql.startsWith('SELECT');
+    const isUpdate = upperSql.startsWith('UPDATE');
+    const isInsert = upperSql.startsWith('INSERT');
+    
+    // If not a data access query, no need to modify
+    if (!isSelect && !isUpdate && !isInsert) {
+        return sql;
+    }
+    
+    // Tables that contain organization_id and need to be restricted
+    const restrictedTables = ['USERS', 'PAYROLLDATA', 'LEAVEBALANCES', 'COMPANYPOLICIES'];
+    
+    // Check if the query involves any of these tables
+    const involvesRestrictedTable = restrictedTables.some(table => upperSql.includes(table));
+    
+    if (!involvesRestrictedTable) {
+        return sql;
+    }
+
+    // Check if this is a query looking for a specific user by name
+    const hasNameFilter = /WHERE.*first_name\s*=\s*['"](.*?)['"]|WHERE.*last_name\s*=\s*['"](.*?)['"]|WHERE.*LIKE\s*['"]%(.*?)%['"]/i.test(sql);
+    
+    // For queries with JOIN clauses
+    if (upperSql.includes(' JOIN ')) {
+        // Extract all table aliases in the query
+        const tableAliasRegex = /(\w+)\s+(?:AS\s+)?([a-z])(?:\s+|\s*(?:ON|INNER|LEFT|RIGHT|JOIN|WHERE))/gi;
+        const tableAliases = {};
+        let match;
+        
+        while ((match = tableAliasRegex.exec(sql)) !== null) {
+            tableAliases[match[2].toLowerCase()] = match[1].toLowerCase();
+        }
+        
+        // Find all organization_id references in the WHERE clause
+        let modifiedSql = sql;
+        
+        // Check if there's already an organization_id filter for Users table
+        const hasUserOrgFilter = /u\.organization_id\s*=\s*['"].*?['"]/i.test(sql);
+        
+        // If there's a JOIN with Users table but no organization_id filter, add it
+        if (tableAliases['u'] === 'users' && !hasUserOrgFilter) {
+            // If there's a WHERE clause, add to it
+            if (upperSql.includes(' WHERE ')) {
+                modifiedSql = modifiedSql.replace(/WHERE\s+/i, `WHERE u.organization_id = '${organizationId}' AND `);
+            } else {
+                // If no WHERE clause, add one
+                modifiedSql = `${modifiedSql} WHERE u.organization_id = '${organizationId}'`;
+            }
+            return modifiedSql;
+        }
+    }
+    
+    // For simple SELECT queries looking for users by name
+    if (isSelect && hasNameFilter) {
+        // Check if there's already an organization_id filter
+        const hasOrgFilter = /organization_id\s*=\s*['"].*?['"]/i.test(sql);
+        
+        if (!hasOrgFilter) {
+            // If there's a WHERE clause, add to it
+            if (upperSql.includes(' WHERE ')) {
+                return sql.replace(/WHERE\s+/i, `WHERE organization_id = '${organizationId}' AND `);
+            } else {
+                // If no WHERE clause, add one
+                return `${sql} WHERE organization_id = '${organizationId}'`;
+            }
+        }
+    }
+    
+    // For SELECT queries
+    if (isSelect) {
+        // If the query already has a WHERE clause, add organization restriction
+        if (upperSql.includes(' WHERE ')) {
+            // Check if there's already an organization_id filter
+            const hasOrgFilter = /organization_id\s*=\s*['"].*?['"]/i.test(sql);
+            
+            if (!hasOrgFilter) {
+                return sql.replace(/WHERE\s+/i, `WHERE organization_id = '${organizationId}' AND `);
+            }
+        } else {
+            // If no WHERE clause, add one with organization restriction
+            return `${sql} WHERE organization_id = '${organizationId}'`;
+        }
+    }
+    
+    // For UPDATE queries
+    if (isUpdate) {
+        // If the query already has a WHERE clause, add organization restriction
+        if (upperSql.includes(' WHERE ')) {
+            // Check if there's already an organization_id filter
+            const hasOrgFilter = /organization_id\s*=\s*['"].*?['"]/i.test(sql);
+            
+            if (!hasOrgFilter) {
+                return sql.replace(/WHERE\s+/i, `WHERE organization_id = '${organizationId}' AND `);
+            }
+        } else {
+            // If no WHERE clause, add one with organization restriction
+            return `${sql} WHERE organization_id = '${organizationId}'`;
+        }
+    }
+    
+    // For INSERT queries where we need to ensure the organization_id is correctly set
+    if (isInsert && upperSql.includes('INSERT INTO')) {
+        // If it's an INSERT with a SELECT, make sure the SELECT has organization filter
+        if (upperSql.includes('SELECT')) {
+            // Find the position of the SELECT
+            const selectPos = upperSql.indexOf('SELECT');
+            
+            // Split the query at the SELECT
+            const insertPart = sql.substring(0, selectPos);
+            let selectPart = sql.substring(selectPos);
+            
+            // Add organization filter to the SELECT part if it's not already there
+            if (!selectPart.includes(`organization_id = '${organizationId}'`)) {
+                if (selectPart.toUpperCase().includes(' WHERE ')) {
+                    selectPart = selectPart.replace(/WHERE\s+/i, `WHERE organization_id = '${organizationId}' AND `);
+                } else {
+                    selectPart = `${selectPart} WHERE organization_id = '${organizationId}'`;
+                }
+            }
+            
+            return insertPart + selectPart;
+        }
+        
+        // Direct INSERT with VALUES - ensure organization_id is set correctly
+        // This is more complex and would require parsing the column names and values
+        // For now, we'll rely on the AI model to generate correct INSERTs
+    }
+    
+    return sql;
 }
 
 // Add a helper function to check for simple greetings
@@ -275,6 +472,13 @@ app.post('/ai-query', async (req, res) => {
         if (generatedSql.toUpperCase() === 'IRRELEVANT') {
             return res.status(400).json({ message: confirmationMessage || "I am an HR assistant for Vipraco and can only answer questions about employee data, leave, payroll, and company policies. How can I help you with an HR-related query?" });
         }
+        
+        if (generatedSql.toUpperCase() === 'CROSS_ORG_ACCESS') {
+            return res.status(403).json({ 
+                success: false,
+                message: confirmationMessage || "You don't have permission to access information about employees from other organizations." 
+            });
+        }
 
         if (!isQuerySafe(generatedSql)) {
             return res.status(403).json({ message: 'For security reasons, I cannot perform this operation. Please contact your system administrator if you need assistance.' });
@@ -287,12 +491,25 @@ app.post('/ai-query', async (req, res) => {
         
         // Fix any SQL syntax issues
         const fixedSql = fixSqlSyntax(generatedSql);
+        
+        // Enforce organization-level access control
+        const restrictedSql = enforceOrganizationAccess(fixedSql, organizationId);
 
         try {
-            const [queryResult] = await dbPool.execute(fixedSql);
+            // Validate if query is trying to access data from another organization
+            const validationResult = await validateCrossOrgAccess(restrictedSql, organizationId);
+            
+            if (!validationResult.valid) {
+                return res.status(403).json({
+                    success: false,
+                    message: validationResult.message
+                });
+            }
+            
+            const [queryResult] = await dbPool.execute(restrictedSql);
             
             // Log the SQL query execution details
-            logSqlQuery(fixedSql, prompt, queryResult);
+            logSqlQuery(restrictedSql, prompt, queryResult);
 
             // For SELECT, result is an array of rows. For others, it's an info object.
             if (Array.isArray(queryResult)) {
@@ -321,7 +538,7 @@ app.post('/ai-query', async (req, res) => {
             res.json({ success: true, message: confirmationMessage, details: queryResult });
         } catch (dbError) {
             // Use the enhanced error handler
-            const errorResponse = handleDatabaseError(dbError, fixedSql);
+            const errorResponse = handleDatabaseError(dbError, restrictedSql);
             // Convert error to message for user-friendly display
             return res.status(500).json({ 
                 success: false,
@@ -453,6 +670,14 @@ exports.handler = async (event, context) => {
                             statusCode: 400,
                             body: JSON.stringify({ message: confirmationMessage || "I am an HR assistant for Vipraco and can only answer questions about employee data, leave, payroll, and company policies. How can I help you with an HR-related query?" }),
                         };
+                    } else if (generatedSql.toUpperCase() === 'CROSS_ORG_ACCESS') {
+                        response = {
+                            statusCode: 403,
+                            body: JSON.stringify({ 
+                                success: false,
+                                message: confirmationMessage || "You don't have permission to access information about employees from other organizations." 
+                            }),
+                        };
                     } else if (!isQuerySafe(generatedSql)) {
                         response = {
                             statusCode: 403,
@@ -466,43 +691,59 @@ exports.handler = async (event, context) => {
                         
                         // Fix any SQL syntax issues
                         const fixedSql = fixSqlSyntax(generatedSql);
+                        
+                        // Enforce organization-level access control
+                        const restrictedSql = enforceOrganizationAccess(fixedSql, organizationId);
 
                         try {
-                            const [queryResult] = await dbPool.execute(fixedSql);
+                            // Validate if query is trying to access data from another organization
+                            const validationResult = await validateCrossOrgAccess(restrictedSql, organizationId);
                             
-                            // Log the SQL query execution details
-                            logSqlQuery(fixedSql, prompt, queryResult);
-                            
-                            let responseMessage = confirmationMessage;
-                            let success = true;
-                            
-                            // Check if the data array is empty and provide a meaningful message
-                            if (Array.isArray(queryResult) && queryResult.length === 0) {
-                                // Extract the subject of the query from the confirmation message
-                                const subject = confirmationMessage.replace(/^(Found|Retrieved|Got|Fetched)\s+/, '');
-                                responseMessage = `I couldn't find any information about ${subject}. The data may not exist in our records.`;
-                            }
-                            
-                            // For UPDATE queries, check if any rows were affected
-                            if (!Array.isArray(queryResult) && queryResult.affectedRows === 0) {
-                                responseMessage = `I couldn't update ${confirmationMessage.toLowerCase().replace('has been updated', 'because no matching records were found')}`;
-                                success = false;
-                            }
-                            
-                            const responseBody = {
-                                success: success,
-                                message: responseMessage,
-                                data: Array.isArray(queryResult) ? queryResult : undefined,
-                                details: !Array.isArray(queryResult) ? queryResult : undefined,
-                            };
+                            if (!validationResult.valid) {
+                                response = {
+                                    statusCode: 403,
+                                    body: JSON.stringify({
+                                        success: false,
+                                        message: validationResult.message
+                                    }),
+                                };
+                            } else {
+                                const [queryResult] = await dbPool.execute(restrictedSql);
+                                
+                                // Log the SQL query execution details
+                                logSqlQuery(restrictedSql, prompt, queryResult);
+                                
+                                let responseMessage = confirmationMessage;
+                                let success = true;
+                                
+                                // Check if the data array is empty and provide a meaningful message
+                                if (Array.isArray(queryResult) && queryResult.length === 0) {
+                                    // Extract the subject of the query from the confirmation message
+                                    const subject = confirmationMessage.replace(/^(Found|Retrieved|Got|Fetched)\s+/, '');
+                                    responseMessage = `I couldn't find any information about ${subject}. The data may not exist in our records.`;
+                                }
+                                
+                                // For UPDATE queries, check if any rows were affected
+                                if (!Array.isArray(queryResult) && queryResult.affectedRows === 0) {
+                                    responseMessage = `I couldn't update ${confirmationMessage.toLowerCase().replace('has been updated', 'because no matching records were found')}`;
+                                    success = false;
+                                }
+                                
+                                const responseBody = {
+                                    success: success,
+                                    message: responseMessage,
+                                    data: Array.isArray(queryResult) ? queryResult : undefined,
+                                    details: !Array.isArray(queryResult) ? queryResult : undefined,
+                                };
 
-                            response = {
-                                statusCode: 200,
-                                body: JSON.stringify(responseBody),
-                            };
+                                response = {
+                                    statusCode: 200,
+                                    body: JSON.stringify(responseBody),
+                                };
+                            }
                         } catch (dbError) {
                             // Use the enhanced error handler
-                            const errorResponse = handleDatabaseError(dbError, fixedSql);
+                            const errorResponse = handleDatabaseError(dbError, restrictedSql);
                             response = {
                                 statusCode: 500,
                                 body: JSON.stringify({ 
