@@ -101,7 +101,7 @@ ${exampleQueries}
    Response: "CROSS_ORG_ACCESS" with message "I'm sorry, but you don't have permission to access information about employees from other organizations."
 
 7. Query: "Show me all pending leave requests"
-   SQL: "SELECT u.user_id, u.first_name, u.last_name, u.department, lb.leave_type, lb.leaves_pending_approval FROM LeaveBalances lb INNER JOIN Users u ON lb.user_id = u.user_id WHERE lb.leaves_pending_approval > 0 AND lb.organization_id = 'TECHCORP_IN' ORDER BY u.department, u.first_name"
+   SQL: "SELECT u.user_id, u.first_name, u.last_name, u.department, lb.leave_type, lb.leaves_pending_approval, lb.start_date, DATE_ADD(lb.start_date, INTERVAL lb.leaves_pending_approval DAY) as end_date FROM LeaveBalances lb INNER JOIN Users u ON lb.user_id = u.user_id WHERE lb.leaves_pending_approval > 0 AND lb.organization_id = 'TECHCORP_IN' ORDER BY u.department, u.first_name"
    Confirmation: "Here are all the pending leave requests for your organization. You can approve or reject them by name."
    
 8. Query: "Approve Rahul's earned leave"

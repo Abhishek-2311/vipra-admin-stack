@@ -13,7 +13,7 @@ Leave Management
 10."How many leaves are pending approval for me?"
 
 Admin Leave Management
-11. "Show all pending leave requests"
+11. "Show all pending leave requests" (displays user info, leave type, start date, and calculated end date)
 12. "Show me leave requests waiting for approval"
 13. "Approve Rahul's earned leave request" (sends email notification to Rahul)
 14. "Reject Amit's leave request" (sends email notification to Amit)

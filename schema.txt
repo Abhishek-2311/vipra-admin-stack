@@ -43,6 +43,7 @@ ID for this record
  total_allotted INT NOT NULL,
  leaves_taken INT NOT NULL DEFAULT 0,
  leaves_pending_approval INT NOT NULL DEFAULT 0,
+ start_date DATE, -- Start date for the requested leave
  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY (organization_id) REFERENCES
 Organizations(organization_id),
