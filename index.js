@@ -269,7 +269,194 @@ exports.handler = async (event) => {
                 };
             }
             
-            // Handle salary queries with special debugging
+            // Detect leave application keywords and types for later processing
+            const leaveApplicationKeywords = [
+                'apply for leave', 'request leave', 'take leave', 
+                'submit leave', 'need leave', 'want to apply for leave',
+                'i want leave', 'apply leave', 'need time off',
+                'apply for sick leave', 'apply for casual leave', 'apply for earned leave',
+                'want sick leave', 'want casual leave', 'want earned leave',
+                'need sick leave', 'need casual leave', 'need earned leave',
+                'request sick leave', 'request casual leave', 'request earned leave'
+            ];
+            
+            // Enhanced leave application detection
+            const isLeaveApplicationRequest = leaveApplicationKeywords.some(keyword => 
+                trimmedPrompt.includes(keyword)
+            ) || (
+                // Also detect patterns like "I want to apply for leave" + any leave type
+                (trimmedPrompt.includes('apply') || trimmedPrompt.includes('request') || 
+                 trimmedPrompt.includes('want') || trimmedPrompt.includes('need')) && 
+                (trimmedPrompt.includes('leave')) &&
+                (trimmedPrompt.includes('sick') || trimmedPrompt.includes('casual') || 
+                 trimmedPrompt.includes('earned'))
+            );
+            
+            console.log("Leave application detection result:", isLeaveApplicationRequest);
+            
+            // Check if this is a leave application with a specified leave type
+            const leaveTypeKeywords = {
+                'sick leave': 'Sick Leave',
+                'casual leave': 'Casual Leave',
+                'earned leave': 'Earned Leave',
+                'sick': 'Sick Leave',
+                'casual': 'Casual Leave',
+                'earned': 'Earned Leave'
+            };
+            
+            let specifiedLeaveType = null;
+            for (const [keyword, formalName] of Object.entries(leaveTypeKeywords)) {
+                if (trimmedPrompt.includes(keyword)) {
+                    specifiedLeaveType = formalName;
+                    console.log(`Detected leave type: ${formalName} from keyword: ${keyword}`);
+                    break;
+                }
+            }
+            
+            // Improved detection for follow-up leave type responses
+            // Check if this is a simple single word response that is a leave type
+            const isSingleWordLeaveType = 
+                // Is it a very short message (1-2 words)
+                (prompt.split(' ').length <= 2) && 
+                // And it contains one of our leave type keywords
+                (trimmedPrompt.includes('sick') || 
+                 trimmedPrompt.includes('casual') || 
+                 trimmedPrompt.includes('earned'));
+            
+            console.log("Single word leave type check:", isSingleWordLeaveType);
+            
+            // Handle leave application response
+            const isLeaveTypeResponse = 
+                // Either the flag was set in the previous request
+                (body.leave_application_pending === true) || 
+                // Or this is a simple single-word response with a leave type
+                isSingleWordLeaveType;
+            
+            console.log("Leave type response check:", {
+                isPending: body.leave_application_pending === true,
+                isSingleWord: isSingleWordLeaveType,
+                hasSick: trimmedPrompt.includes('sick'),
+                hasCasual: trimmedPrompt.includes('casual'),
+                hasEarned: trimmedPrompt.includes('earned'),
+                isLeaveTypeResponse: isLeaveTypeResponse
+            });
+            
+            // LAZY INITIALIZATION: Create clients on first request.
+            if (!dbPool) {
+                console.log("Creating database pool");
+                
+                // Check if all required database env variables are set
+                const requiredDbEnvVars = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_PORT'];
+                const missingVars = requiredDbEnvVars.filter(varName => !process.env[varName]);
+                
+                if (missingVars.length > 0) {
+                    const errorMsg = `Missing database environment variables: ${missingVars.join(', ')}`;
+                    console.error(errorMsg);
+                    throw new Error(errorMsg);
+                }
+                
+                console.log("Database env vars:", {
+                    host: process.env.DB_HOST,
+                    user: process.env.DB_USER,
+                    dbName: process.env.DB_NAME,
+                    port: process.env.DB_PORT
+                });
+                
+                try {
+                    dbPool = mysql.createPool({
+                        host: process.env.DB_HOST,
+                        user: process.env.DB_USER,
+                        password: process.env.DB_PASSWORD,
+                        database: process.env.DB_NAME,
+                        port: process.env.DB_PORT,
+                        waitForConnections: true,
+                        connectionLimit: 10,
+                        queueLimit: 0
+                    });
+                    
+                    // Test the connection
+                    console.log("Testing database connection...");
+                    await dbPool.execute('SELECT 1');
+                    console.log("Database connection successful");
+                } catch (error) {
+                    console.error("Error initializing database connection:", error);
+                    throw new Error(`Failed to initialize database connection: ${error.message}`);
+                }
+            } else {
+                console.log("Using existing database pool");
+            }
+
+            if (!genAI) {
+                if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "ENTER_YOUR_GEMINI_API_KEY") {
+                    throw new Error('GEMINI_API_KEY is not set. Please deploy again and provide the key when prompted.');
+                }
+                genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+            }
+
+            // 1. Fetch user's role and name from the database
+            const [users] = await dbPool.execute('SELECT role, first_name, last_name FROM Users WHERE user_id = ? AND organization_id = ?', [userId, organizationId]);
+
+            if (users.length === 0) {
+                return {
+                    statusCode: 403,
+                    headers: headers,
+                    body: JSON.stringify({ message: 'User not found or not part of this organization.', success: false })
+                };
+            }
+            
+            const userRole = users[0].role;
+            const userFullName = `${users[0].first_name} ${users[0].last_name}`;
+            
+            // Handle leave balance queries directly for reliability - AFTER DB INIT
+            const leaveKeywords = ['my leave', 'leave balance', 'how many leaves', 'sick leave balance', 'casual leave balance', 'earned leave balance', 'leaves left', 'leaves remaining'];
+            
+            // Improved detection to avoid conflicts with leave application
+            const isLeaveQuery = leaveKeywords.some(keyword => trimmedPrompt.includes(keyword)) && 
+                               !(trimmedPrompt.includes('apply') || 
+                                 trimmedPrompt.includes('request') || 
+                                 trimmedPrompt.includes('submit') ||
+                                 trimmedPrompt.includes('want to') ||
+                                 trimmedPrompt.includes('need to'));
+                                 
+            if (isLeaveQuery) {
+                console.log("LEAVE QUERY DETECTED: Applying special handling for better reliability");
+                
+                try {
+                    // Direct query for leave balances
+                    const [leaveData] = await dbPool.execute(
+                        'SELECT * FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
+                        [userId, organizationId]
+                    );
+                    
+                    if (leaveData.length === 0) {
+                        return {
+                            statusCode: 200,
+                            headers: headers,
+                            body: JSON.stringify({ 
+                                success: true, 
+                                message: "Sorry, I couldn't find any leave balance information for you in our records.",
+                                data: []
+                            })
+                        };
+                    }
+                    
+                    return {
+                        statusCode: 200,
+                        headers: headers,
+                        body: JSON.stringify({ 
+                            success: true, 
+                            message: `Found your leave balance information.`,
+                            data: leaveData
+                        })
+                    };
+                } catch (error) {
+                    console.error("Error processing direct leave query:", error);
+                    // If direct query fails, continue with LLM-based approach
+                    console.log("Falling back to LLM-based leave query");
+                }
+            }
+            
+            // Handle salary queries with special debugging - AFTER DB INIT
             const salaryKeywords = ['my salary', 'my base salary', 'my ctc', 'how much do i earn', 'how much do i make', 'my pay', 'my compensation'];
             const isSalaryQuery = salaryKeywords.some(keyword => trimmedPrompt.includes(keyword));
             if (isSalaryQuery) {
@@ -311,79 +498,60 @@ exports.handler = async (event) => {
                 }
             }
             
-            // Handle leave balance queries directly for reliability
-            const leaveKeywords = ['my leave', 'leave balance', 'how many leaves', 'sick leave', 'casual leave', 'earned leave', 'leaves left', 'leaves remaining'];
-            const isLeaveQuery = leaveKeywords.some(keyword => trimmedPrompt.includes(keyword));
-            if (isLeaveQuery) {
-                console.log("LEAVE QUERY DETECTED: Applying special handling for better reliability");
-                
-                try {
-                    // Direct query for leave balances
-                    const [leaveData] = await dbPool.execute(
-                        'SELECT * FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
-                        [userId, organizationId]
-                    );
-                    
-                    if (leaveData.length === 0) {
-                        return {
-                            statusCode: 200,
-                            headers: headers,
-                            body: JSON.stringify({ 
-                                success: true, 
-                                message: "Sorry, I couldn't find any leave balance information for you in our records.",
-                                data: []
-                            })
-                        };
-                    }
-                    
-                    return {
-                        statusCode: 200,
-                        headers: headers,
-                        body: JSON.stringify({ 
-                            success: true, 
-                            message: `Found your leave balance information.`,
-                            data: leaveData
-                        })
-                    };
-                } catch (error) {
-                    console.error("Error processing direct leave query:", error);
-                    // If direct query fails, continue with LLM-based approach
-                    console.log("Falling back to LLM-based leave query");
-                }
-            }
-            
-            // Handle leave application requests
-            const leaveApplicationKeywords = [
-                'apply for leave', 'request leave', 'take leave', 
-                'submit leave', 'need leave', 'want to apply for leave',
-                'i want leave', 'apply leave', 'need time off'
-            ];
-            
-            const isLeaveApplicationRequest = leaveApplicationKeywords.some(keyword => 
-                trimmedPrompt.includes(keyword)
-            );
-            
-            // Check if this is a leave application with a specified leave type
-            const leaveTypeKeywords = {
-                'sick leave': 'Sick Leave',
-                'casual leave': 'Casual Leave',
-                'earned leave': 'Earned Leave'
-            };
-            
-            let specifiedLeaveType = null;
-            for (const [keyword, formalName] of Object.entries(leaveTypeKeywords)) {
-                if (trimmedPrompt.includes(keyword)) {
-                    specifiedLeaveType = formalName;
-                    break;
-                }
-            }
-            
-            // If this is a leave application request
+            // If this is a leave application request - PROCESS AFTER DB INIT
             if (isLeaveApplicationRequest) {
-                console.log("LEAVE APPLICATION REQUEST DETECTED");
+                console.log("LEAVE APPLICATION REQUEST DETECTED: ", {
+                    prompt: trimmedPrompt,
+                    leaveType: specifiedLeaveType,
+                    dbPoolExists: !!dbPool,
+                    organizationId,
+                    userId
+                });
                 
                 // If no leave type specified, ask the user for the type
                 if (!specifiedLeaveType) {
+                    // Store the pending leave application in a database or session store
+                    // This allows us to track state between requests
+                    try {
+                        // Check if there's already a pending leave application table
+                        const [tableExists] = await dbPool.execute(
+                            "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = ? AND table_name = 'PendingLeaveApplications'",
+                            [process.env.DB_NAME]
+                        );
+                        
+                        if (tableExists[0].count === 0) {
+                            // Create the table if it doesn't exist
+                            await dbPool.execute(`
+                                CREATE TABLE PendingLeaveApplications (
+                                    id INT AUTO_INCREMENT PRIMARY KEY,
+                                    user_id VARCHAR(50) NOT NULL,
+                                    organization_id VARCHAR(50) NOT NULL,
+                                    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                    status VARCHAR(20) DEFAULT 'PENDING',
+                                    UNIQUE KEY (user_id, organization_id)
+                                )
+                            `);
+                            console.log("Created PendingLeaveApplications table");
+                        }
+                        
+                        // First delete any existing pending applications for this user
+                        await dbPool.execute(
+                            'DELETE FROM PendingLeaveApplications WHERE user_id = ? AND organization_id = ?',
+                            [userId, organizationId]
+                        );
+                        
+                        // Insert the new pending application
+                        await dbPool.execute(
+                            'INSERT INTO PendingLeaveApplications (user_id, organization_id) VALUES (?, ?)',
+                            [userId, organizationId]
+                        );
+                        
+                        console.log("Stored pending leave application in database");
+                    } catch (error) {
+                        console.error("Error storing pending leave application:", error);
+                        // Continue even if we couldn't store the state - we'll rely on the client-side flag
+                    }
+                    
                     return {
                         statusCode: 200,
                         headers: headers,
@@ -397,26 +565,49 @@ exports.handler = async (event) => {
                 }
                 
                 try {
+                    // Additional check for database connection
+                    if (!dbPool) {
+                        console.error("Database pool is not initialized!");
+                        throw new Error("Database pool is not initialized");
+                    }
+                    
+                    console.log("Executing query to check leave balance");
+                    
                     // First check if the user has this type of leave available
                     const [leaveBalances] = await dbPool.execute(
                         'SELECT * FROM LeaveBalances WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
                         [userId, organizationId, specifiedLeaveType]
                     );
                     
-                    if (leaveBalances.length === 0) {
-                        return {
-                            statusCode: 200,
-                            headers: headers,
-                            body: JSON.stringify({ 
-                                success: false, 
-                                message: `You don't have any ${specifiedLeaveType} balance configured in the system.`,
-                                data: []
-                            })
-                        };
+                    console.log(`Checking leave balance for ${specifiedLeaveType}:`, leaveBalances);
+                    
+                    // Get all leave types for the user to calculate total leaves used
+                    const [allLeaveTypes] = await dbPool.execute(
+                        'SELECT leave_type, total_allotted, leaves_taken, leaves_pending_approval FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
+                        [userId, organizationId]
+                    );
+                    
+                    console.log("All leave types for user:", allLeaveTypes);
+                    
+                    // Calculate total leaves used across all leave types
+                    let totalLeavesUsed = 0;
+                    let defaultAllotment = 10; // Default allotment if no leave types exist
+                    
+                    if (allLeaveTypes.length > 0) {
+                        // Sum up all leaves taken and pending
+                        totalLeavesUsed = allLeaveTypes.reduce((sum, leave) => 
+                            sum + leave.leaves_taken + leave.leaves_pending_approval, 0);
+                        
+                        // Get the total_allotted value from the first leave type
+                        // This assumes all leave types have the same total_allotted value
+                        defaultAllotment = allLeaveTypes[0].total_allotted;
                     }
                     
-                    const leaveBalance = leaveBalances[0];
-                    const availableLeaves = leaveBalance.total_allotted - leaveBalance.leaves_taken - leaveBalance.leaves_pending_approval;
+                    console.log("Total leaves used across all types:", totalLeavesUsed);
+                    console.log("Default allotment:", defaultAllotment);
+                    
+                    // Calculate available leaves
+                    const availableLeaves = defaultAllotment - totalLeavesUsed;
                     
                     if (availableLeaves <= 0) {
                         return {
@@ -424,17 +615,32 @@ exports.handler = async (event) => {
                             headers: headers,
                             body: JSON.stringify({ 
                                 success: false, 
-                                message: `You don't have any ${specifiedLeaveType} balance available. Your current balance: ${availableLeaves} days.`,
+                                message: `You don't have any leave balance available. You've used ${totalLeavesUsed} out of ${defaultAllotment} total leave days.`,
                                 data: []
                             })
                         };
                     }
                     
-                    // Update leaves_pending_approval
-                    await dbPool.execute(
-                        'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + 1, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
-                        [userId, organizationId, specifiedLeaveType]
-                    );
+                    // If the specified leave type doesn't exist for this user, create it
+                    if (leaveBalances.length === 0) {
+                        console.log(`Leave type ${specifiedLeaveType} not found for user. Creating it...`);
+                        
+                        // Insert the new leave type
+                        await dbPool.execute(
+                            'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, last_updated) VALUES (?, ?, ?, ?, 0, 1, NOW())',
+                            [organizationId, userId, specifiedLeaveType, defaultAllotment]
+                        );
+                        
+                        console.log(`Created new leave type ${specifiedLeaveType} for user with 1 pending approval`);
+                    } else {
+                        // Update leaves_pending_approval for the specified leave type
+                        await dbPool.execute(
+                            'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + 1, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
+                            [userId, organizationId, specifiedLeaveType]
+                        );
+                        
+                        console.log(`Updated leave_pending_approval for ${specifiedLeaveType}`);
+                    }
                     
                     // Get manager information to include in the response
                     const [managerInfo] = await dbPool.execute(
@@ -447,17 +653,31 @@ exports.handler = async (event) => {
                         managerName = `${managerInfo[0].first_name} ${managerInfo[0].last_name}`;
                     }
                     
+                    // Get updated leave balances to show in response
+                    const [updatedLeaveTypes] = await dbPool.execute(
+                        'SELECT leave_type, total_allotted, leaves_taken, leaves_pending_approval FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
+                        [userId, organizationId]
+                    );
+                    
+                    // Calculate new total leaves used
+                    const newTotalLeavesUsed = updatedLeaveTypes.reduce((sum, leave) => 
+                        sum + leave.leaves_taken + leave.leaves_pending_approval, 0);
+                    
+                    const remainingLeaves = defaultAllotment - newTotalLeavesUsed;
+                    
                     return {
                         statusCode: 200,
                         headers: headers,
                         body: JSON.stringify({ 
                             success: true, 
-                            message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from ${managerName}.`,
+                            message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from ${managerName}. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
                             data: [{
                                 leave_type: specifiedLeaveType,
                                 status: 'PENDING',
                                 days_requested: 1,
-                                applied_on: new Date().toISOString()
+                                applied_on: new Date().toISOString(),
+                                remaining_leaves: remainingLeaves,
+                                leave_balances: updatedLeaveTypes
                             }]
                         })
                     };
@@ -469,157 +689,201 @@ exports.handler = async (event) => {
                         body: JSON.stringify({ 
                             message: 'Failed to process leave application.', 
                             details: error.message,
+                            stack: error.stack,
                             success: false
                         })
                     };
                 }
             }
             
-            // Check if this is a response to a leave type question
-            const isLeaveTypeResponse = (body.leave_application_pending === true) && 
-                                      (trimmedPrompt.includes('sick') || 
-                                       trimmedPrompt.includes('casual') || 
-                                       trimmedPrompt.includes('earned'));
-            
+            // Handle leave type response after db init
             if (isLeaveTypeResponse) {
                 console.log("LEAVE TYPE RESPONSE DETECTED");
                 
-                let specifiedLeaveType = null;
-                if (trimmedPrompt.includes('sick')) {
-                    specifiedLeaveType = 'Sick Leave';
-                } else if (trimmedPrompt.includes('casual')) {
-                    specifiedLeaveType = 'Casual Leave';
-                } else if (trimmedPrompt.includes('earned')) {
-                    specifiedLeaveType = 'Earned Leave';
-                }
-                
-                if (!specifiedLeaveType) {
-                    return {
-                        statusCode: 200,
-                        headers: headers,
-                        body: JSON.stringify({ 
-                            success: false, 
-                            message: "I couldn't understand the leave type. Please specify one of: Sick Leave, Casual Leave, or Earned Leave.",
-                            data: [],
-                            leave_application_pending: true
-                        })
-                    };
-                }
-                
+                // Check if there's a pending leave application for this user
                 try {
-                    // Check if the user has this type of leave available
-                    const [leaveBalances] = await dbPool.execute(
-                        'SELECT * FROM LeaveBalances WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
-                        [userId, organizationId, specifiedLeaveType]
+                    const [pendingApplications] = await dbPool.execute(
+                        'SELECT * FROM PendingLeaveApplications WHERE user_id = ? AND organization_id = ? AND status = ?',
+                        [userId, organizationId, 'PENDING']
                     );
                     
-                    if (leaveBalances.length === 0) {
-                        return {
-                            statusCode: 200,
-                            headers: headers,
-                            body: JSON.stringify({ 
-                                success: false, 
-                                message: `You don't have any ${specifiedLeaveType} balance configured in the system.`,
-                                data: []
-                            })
-                        };
+                    // If there's no pending application in the database but the client didn't send the flag,
+                    // this might not actually be a leave application response
+                    if (pendingApplications.length === 0 && body.leave_application_pending !== true) {
+                        // Only treat it as a leave response if it's a very clear single-word leave type
+                        if (!isSingleWordLeaveType || prompt.trim().split(' ').length > 1) {
+                            console.log("No pending leave application found, treating as a regular query");
+                            // This is likely just a query about leave balance, not a response to our prompt
+                            isLeaveTypeResponse = false;
+                        }
+                    } else {
+                        console.log("Found pending leave application:", pendingApplications[0]);
                     }
-                    
-                    const leaveBalance = leaveBalances[0];
-                    const availableLeaves = leaveBalance.total_allotted - leaveBalance.leaves_taken - leaveBalance.leaves_pending_approval;
-                    
-                    if (availableLeaves <= 0) {
-                        return {
-                            statusCode: 200,
-                            headers: headers,
-                            body: JSON.stringify({ 
-                                success: false, 
-                                message: `You don't have any ${specifiedLeaveType} balance available. Your current balance: ${availableLeaves} days.`,
-                                data: []
-                            })
-                        };
-                    }
-                    
-                    // Update leaves_pending_approval
-                    await dbPool.execute(
-                        'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + 1, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
-                        [userId, organizationId, specifiedLeaveType]
-                    );
-                    
-                    // Get manager information to include in the response
-                    const [managerInfo] = await dbPool.execute(
-                        'SELECT u2.first_name, u2.last_name FROM Users u1 JOIN Users u2 ON u1.manager_id = u2.user_id WHERE u1.user_id = ? AND u1.organization_id = ?',
-                        [userId, organizationId]
-                    );
-                    
-                    let managerName = "your manager";
-                    if (managerInfo.length > 0) {
-                        managerName = `${managerInfo[0].first_name} ${managerInfo[0].last_name}`;
-                    }
-                    
-                    return {
-                        statusCode: 200,
-                        headers: headers,
-                        body: JSON.stringify({ 
-                            success: true, 
-                            message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from ${managerName}.`,
-                            data: [{
-                                leave_type: specifiedLeaveType,
-                                status: 'PENDING',
-                                days_requested: 1,
-                                applied_on: new Date().toISOString()
-                            }]
-                        })
-                    };
                 } catch (error) {
-                    console.error("Error processing leave application response:", error);
-                    return {
-                        statusCode: 500,
-                        headers: headers,
-                        body: JSON.stringify({ 
-                            message: 'Failed to process leave application.', 
-                            details: error.message,
-                            success: false
-                        })
-                    };
+                    // If we can't check the database, just rely on the client-side flag
+                    console.error("Error checking pending leave applications:", error);
+                }
+                
+                if (!isLeaveTypeResponse) {
+                    // Skip this handler and continue to the next one
+                    console.log("Not a leave type response after all, continuing...");
+                } else {
+                    let specifiedLeaveType = null;
+                    if (trimmedPrompt.includes('sick')) {
+                        specifiedLeaveType = 'Sick Leave';
+                    } else if (trimmedPrompt.includes('casual')) {
+                        specifiedLeaveType = 'Casual Leave';
+                    } else if (trimmedPrompt.includes('earned')) {
+                        specifiedLeaveType = 'Earned Leave';
+                    }
+                    
+                    if (!specifiedLeaveType) {
+                        return {
+                            statusCode: 200,
+                            headers: headers,
+                            body: JSON.stringify({ 
+                                success: false, 
+                                message: "I couldn't understand the leave type. Please specify one of: Sick Leave, Casual Leave, or Earned Leave.",
+                                data: [],
+                                leave_application_pending: true
+                            })
+                        };
+                    }
+                    
+                    try {
+                        // Clean up the pending application
+                        try {
+                            await dbPool.execute(
+                                'DELETE FROM PendingLeaveApplications WHERE user_id = ? AND organization_id = ?',
+                                [userId, organizationId]
+                            );
+                        } catch (error) {
+                            console.error("Error cleaning up pending application:", error);
+                            // Continue even if cleanup fails
+                        }
+                        
+                        // Check if the user has this type of leave available
+                        const [leaveBalances] = await dbPool.execute(
+                            'SELECT * FROM LeaveBalances WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
+                            [userId, organizationId, specifiedLeaveType]
+                        );
+                        
+                        // Get all leave types for the user to calculate total leaves used
+                        const [allLeaveTypes] = await dbPool.execute(
+                            'SELECT leave_type, total_allotted, leaves_taken, leaves_pending_approval FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
+                            [userId, organizationId]
+                        );
+                        
+                        console.log("All leave types for user:", allLeaveTypes);
+                        
+                        // Calculate total leaves used across all leave types
+                        let totalLeavesUsed = 0;
+                        let defaultAllotment = 10; // Default allotment if no leave types exist
+                        
+                        if (allLeaveTypes.length > 0) {
+                            // Sum up all leaves taken and pending
+                            totalLeavesUsed = allLeaveTypes.reduce((sum, leave) => 
+                                sum + leave.leaves_taken + leave.leaves_pending_approval, 0);
+                            
+                            // Get the total_allotted value from the first leave type
+                            // This assumes all leave types have the same total_allotted value
+                            defaultAllotment = allLeaveTypes[0].total_allotted;
+                        }
+                        
+                        console.log("Total leaves used across all types:", totalLeavesUsed);
+                        console.log("Default allotment:", defaultAllotment);
+                        
+                        // Calculate available leaves
+                        const availableLeaves = defaultAllotment - totalLeavesUsed;
+                        
+                        if (availableLeaves <= 0) {
+                            return {
+                                statusCode: 200,
+                                headers: headers,
+                                body: JSON.stringify({ 
+                                    success: false, 
+                                    message: `You don't have any leave balance available. You've used ${totalLeavesUsed} out of ${defaultAllotment} total leave days.`,
+                                    data: []
+                                })
+                            };
+                        }
+                        
+                        // If the specified leave type doesn't exist for this user, create it
+                        if (leaveBalances.length === 0) {
+                            console.log(`Leave type ${specifiedLeaveType} not found for user. Creating it...`);
+                            
+                            // Insert the new leave type
+                            await dbPool.execute(
+                                'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, last_updated) VALUES (?, ?, ?, ?, 0, 1, NOW())',
+                                [organizationId, userId, specifiedLeaveType, defaultAllotment]
+                            );
+                            
+                            console.log(`Created new leave type ${specifiedLeaveType} for user with 1 pending approval`);
+                        } else {
+                            // Update leaves_pending_approval for the specified leave type
+                            await dbPool.execute(
+                                'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + 1, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
+                                [userId, organizationId, specifiedLeaveType]
+                            );
+                            
+                            console.log(`Updated leave_pending_approval for ${specifiedLeaveType}`);
+                        }
+                        
+                        // Get manager information to include in the response
+                        const [managerInfo] = await dbPool.execute(
+                            'SELECT u2.first_name, u2.last_name FROM Users u1 JOIN Users u2 ON u1.manager_id = u2.user_id WHERE u1.user_id = ? AND u1.organization_id = ?',
+                            [userId, organizationId]
+                        );
+                        
+                        let managerName = "your manager";
+                        if (managerInfo.length > 0) {
+                            managerName = `${managerInfo[0].first_name} ${managerInfo[0].last_name}`;
+                        }
+                        
+                        // Get updated leave balances to show in response
+                        const [updatedLeaveTypes] = await dbPool.execute(
+                            'SELECT leave_type, total_allotted, leaves_taken, leaves_pending_approval FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
+                            [userId, organizationId]
+                        );
+                        
+                        // Calculate new total leaves used
+                        const newTotalLeavesUsed = updatedLeaveTypes.reduce((sum, leave) => 
+                            sum + leave.leaves_taken + leave.leaves_pending_approval, 0);
+                        
+                        const remainingLeaves = defaultAllotment - newTotalLeavesUsed;
+                        
+                        return {
+                            statusCode: 200,
+                            headers: headers,
+                            body: JSON.stringify({ 
+                                success: true, 
+                                message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from ${managerName}. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
+                                data: [{
+                                    leave_type: specifiedLeaveType,
+                                    status: 'PENDING',
+                                    days_requested: 1,
+                                    applied_on: new Date().toISOString(),
+                                    remaining_leaves: remainingLeaves,
+                                    leave_balances: updatedLeaveTypes
+                                }]
+                            })
+                        };
+                    } catch (error) {
+                        console.error("Error processing leave application response:", error);
+                        return {
+                            statusCode: 500,
+                            headers: headers,
+                            body: JSON.stringify({ 
+                                message: 'Failed to process leave application.', 
+                                details: error.message,
+                                stack: error.stack,
+                                success: false
+                            })
+                        };
+                    }
                 }
             }
-            
-            // LAZY INITIALIZATION: Create clients on first request.
-            if (!dbPool) {
-                dbPool = mysql.createPool({
-                    host: process.env.DB_HOST,
-                    user: process.env.DB_USER,
-                    password: process.env.DB_PASSWORD,
-                    database: process.env.DB_NAME,
-                    port: process.env.DB_PORT,
-                    waitForConnections: true,
-                    connectionLimit: 10,
-                    queueLimit: 0
-                });
-            }
 
-            if (!genAI) {
-                if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "ENTER_YOUR_GEMINI_API_KEY") {
-                    throw new Error('GEMINI_API_KEY is not set. Please deploy again and provide the key when prompted.');
-                }
-                genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            }
-
-            // 1. Fetch user's role and name from the database
-            const [users] = await dbPool.execute('SELECT role, first_name, last_name FROM Users WHERE user_id = ? AND organization_id = ?', [userId, organizationId]);
-
-            if (users.length === 0) {
-                return {
-                    statusCode: 403,
-                    headers: headers,
-                    body: JSON.stringify({ message: 'User not found or not part of this organization.', success: false })
-                };
-            }
-            
-            const userRole = users[0].role;
-            const userFullName = `${users[0].first_name} ${users[0].last_name}`;
-            
             // Directly block identity queries about others for employees
             if (userRole === 'Employee') {
                 // Patterns for asking about other people's IDs
