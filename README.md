@@ -37,11 +37,47 @@ This is a serverless HR Assistant API built using Node.js, Express, and AWS Lamb
 
    # Cors Configuration
    ALLOWED_ORIGINS=http://localhost:3000,
+   
+   # Email Configuration (for leave notifications)
+   EMAIL_SERVICE=gmail
+   EMAIL_USER=your_email@gmail.com
+   EMAIL_PASSWORD=your_app_password
    ```
 
 3. Start the local server:
    ```
    node index.js
+   ```
+
+## Features
+
+### Email Notifications for Leave Approvals/Rejections
+
+The system automatically sends email notifications to employees when their leave requests are approved or rejected by an admin. This feature:
+
+- Sends personalized emails with the employee's name and leave type
+- Works asynchronously to prevent delays in API responses
+- Gracefully handles email sending failures without affecting core functionality
+
+To configure email notifications:
+
+1. Add the required email configuration to your `.env` file:
+   ```
+   EMAIL_SERVICE=gmail
+   EMAIL_USER=your_email@gmail.com
+   EMAIL_PASSWORD=your_app_password
+   ```
+   
+   Note: For Gmail, you need to use an App Password, not your regular password.
+   Generate one at: https://myaccount.google.com/apppasswords
+
+2. Test the feature by approving or rejecting a leave request:
+   ```
+   # Example prompt to approve leave
+   "Approve Rahul's earned leave"
+   
+   # Example prompt to reject leave
+   "Reject Amit's leave request"
    ```
 
 ## Deployment to AWS Lambda

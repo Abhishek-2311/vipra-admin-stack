@@ -15,8 +15,8 @@ Leave Management
 Admin Leave Management
 11. "Show all pending leave requests"
 12. "Show me leave requests waiting for approval"
-13. "Approve Rahul's earned leave request"
-14. "Reject Amit's leave request"
+13. "Approve Rahul's earned leave request" (sends email notification to Rahul)
+14. "Reject Amit's leave request" (sends email notification to Amit)
 15. "How many employees have pending leave requests?"
 
 Company Policies & HR Information

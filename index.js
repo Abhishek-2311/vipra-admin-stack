@@ -3,6 +3,7 @@ const express = require('express');
 const fs = require('fs').promises;
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const mysql = require('mysql2/promise');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(express.json());
@@ -17,6 +18,15 @@ const dbPool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
+});
+
+// Email transporter configuration
+const transporter = nodemailer.createTransport({
+    service: process.env.EMAIL_SERVICE || 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD
+    }
 });
 
 // Initialize Gemini
@@ -49,7 +59,7 @@ Your entire output MUST be a single JSON object. This object must have two keys:
 8.  **Required Fields**: When inserting data, always include ALL required fields. For PayrollData, you must include: organization_id, user_id, base_salary, and ctc. For example, when inserting salary data, always calculate and include the ctc (Cost to Company) value.
 9.  **Prefer Update Over Insert**: For salary operations, prefer UPDATE over INSERT if the record likely exists. Only use INSERT when explicitly told to create a new record.
 10. **STRICT Organization Access Control**: Users can ONLY access data from their own organization. ALWAYS include the organization_id in WHERE clauses for all queries. The organization_id will be provided in the prompt context. NEVER generate a query that could access data from other organizations. If a user asks about someone from another organization (like asking about "Geeta" when they're from TECHCORP_IN), set the "sql" value to "CROSS_ORG_ACCESS" and set the "confirmation_message" to "You don't have permission to access information about employees from other organizations."
-11. **Leave Approval for Admins**: Admins can view all pending leave requests within their organization and approve or reject them. When approving a leave, update the leaves_taken count and reset the leaves_pending_approval to 0. When rejecting a leave, just reset the leaves_pending_approval to 0 without changing leaves_taken.
+11. **Leave Approval for Admins**: Admins can view all pending leave requests within their organization and approve or reject them. When approving a leave, update the leaves_taken count and reset the leaves_pending_approval to 0. When rejecting a leave, just reset the leaves_pending_approval to 0 without changing leaves_taken. Email notifications will be automatically sent to employees when their leave requests are approved or rejected.
 
 **Database Schema:**
 ---
@@ -230,41 +240,77 @@ function handleDatabaseError(error, sql) {
             const fieldName = fieldMatch[1];
             
             // Determine which table the field belongs to
-            let tableName = '';
-            if (sql.toUpperCase().includes('INSERT INTO')) {
-                const tableMatch = sql.match(/INSERT INTO\s+(\w+)/i);
-                if (tableMatch && tableMatch[1]) {
-                    tableName = tableMatch[1];
-                }
-            }
-            
-            // Provide a user-friendly error message
-            errorResponse.error = `Missing required information`;
-            
-            // Create a more natural language message based on the field and table
-            if (tableName === 'PayrollData') {
-                if (fieldName === 'ctc') {
-                    errorResponse.message = "To add salary information, you need to provide the CTC (Cost to Company) value. Please include this in your request.";
-                } else if (fieldName === 'base_salary') {
-                    errorResponse.message = "To add salary information, you need to provide the base salary. Please include this in your request.";
-                } else {
-                    errorResponse.message = `To add salary information, you need to provide the ${fieldName.replace(/_/g, ' ')}. Please include this in your request.`;
-                }
-            } else {
-                errorResponse.message = `The ${fieldName.replace(/_/g, ' ')} is required but was not provided. Please include this information in your request.`;
-            }
+            errorResponse.message = `Missing required field: ${fieldName}. Please provide this value.`;
         }
     } else if (error.code === 'ER_DUP_ENTRY') {
         // Duplicate entry error
-        errorResponse.error = "This record already exists.";
-        errorResponse.message = "This information is already in our system. If you want to update it, please use an update request instead.";
-    } else if (error.code === 'ER_NO_REFERENCED_ROW') {
+        errorResponse.message = "This record already exists. Please update the existing record instead.";
+    } else if (error.code === 'ER_NO_REFERENCED_ROW_2') {
         // Foreign key constraint error
-        errorResponse.error = "Referenced record not found.";
-        errorResponse.message = "One of the references in your request doesn't exist in our system. Please check the information and try again.";
+        errorResponse.message = "The referenced record does not exist. Please check your input values.";
+    } else {
+        // Generic user-friendly message for other errors
+        errorResponse.message = "I encountered an issue with the database. Please try again or rephrase your request.";
     }
     
     return errorResponse;
+}
+
+// Helper function to send email notifications for leave request approvals/rejections
+async function sendLeaveNotificationEmail(userId, action, leaveType) {
+    console.log(`Attempting to send ${action} notification email for user ${userId} regarding ${leaveType}`);
+    
+    try {
+        // Get user email from database
+        console.log(`Fetching user details for ID: ${userId}`);
+        const [userResult] = await dbPool.execute(
+            'SELECT first_name, last_name, email FROM Users WHERE user_id = ?', 
+            [userId]
+        );
+        
+        if (userResult.length === 0) {
+            console.error(`User not found for ID: ${userId}`);
+            return;
+        }
+        
+        const user = userResult[0];
+        console.log(`Found user: ${user.first_name} ${user.last_name}, email: ${user.email}`);
+        
+        const subject = `Leave Request ${action === 'approve' ? 'Approved' : 'Rejected'}`;
+        const text = `Dear ${user.first_name} ${user.last_name},
+
+Your request for ${leaveType} has been ${action === 'approve' ? 'approved' : 'rejected'}.
+
+Regards,
+HR Team
+Vipraco`;
+        
+        console.log(`Sending email to ${user.email} with subject: ${subject}`);
+        console.log('Email configuration:', {
+            service: process.env.EMAIL_SERVICE || 'gmail',
+            user: process.env.EMAIL_USER,
+            // Password hidden for security
+        });
+        
+        // Send email
+        const info = await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: user.email,
+            subject,
+            text
+        });
+        
+        console.log(`Leave notification email sent to ${user.email}, messageId: ${info.messageId}`);
+    } catch (error) {
+        console.error('Error sending leave notification email:', error);
+        console.error('Error details:', error.message);
+        if (error.code === 'EAUTH') {
+            console.error('Authentication error - check your email credentials');
+        } else if (error.code === 'ESOCKET') {
+            console.error('Socket error - check your network connection and email service configuration');
+        }
+        // Don't throw error - we don't want email failures to break the API response
+    }
 }
 
 // Function to enforce organization-level access control
@@ -535,6 +581,41 @@ app.post('/ai-query', async (req, res) => {
                 return;
             }
 
+            // Check if this is a leave approval or rejection and send email notification
+            const isLeaveApproval = restrictedSql.includes('UPDATE LeaveBalances') && 
+                                   (restrictedSql.includes('leaves_pending_approval = 0'));
+            
+            if (isLeaveApproval) {
+                try {
+                    // Extract user information from the SQL query
+                    const userNameMatch = restrictedSql.match(/first_name\s*=\s*['"]([^'"]+)['"]/i);
+                    const leaveTypeMatch = restrictedSql.match(/leave_type\s*=\s*['"]([^'"]+)['"]/i);
+                    
+                    if (userNameMatch) {
+                        const firstName = userNameMatch[1];
+                        
+                        // Get user_id for the employee
+                        const [userResults] = await dbPool.execute(
+                            'SELECT user_id FROM Users WHERE first_name = ? AND organization_id = ?',
+                            [firstName, organizationId]
+                        );
+                        
+                        if (userResults.length > 0) {
+                            const userId = userResults[0].user_id;
+                            const leaveType = leaveTypeMatch ? leaveTypeMatch[1] : 'leave';
+                            const action = restrictedSql.includes('leaves_taken = lb.leaves_taken + lb.leaves_pending_approval') ? 
+                                'approve' : 'reject';
+                            
+                            // Send email notification and wait for it to complete to ensure it's sent in Lambda
+                            await sendLeaveNotificationEmail(userId, action, leaveType);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error processing leave notification:', error);
+                    // Don't let email notification errors affect the API response
+                }
+            }
+
             res.json({ success: true, message: confirmationMessage, details: queryResult });
         } catch (dbError) {
             // Use the enhanced error handler
@@ -559,6 +640,47 @@ app.post('/ai-query', async (req, res) => {
 
 app.get('/', (req, res) => {
     res.send('AI Backend is running!');
+});
+
+// Test endpoint for email verification
+app.get('/test-email', async (req, res) => {
+    try {
+        // Create test email
+        const testMailOptions = {
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER, // Send to yourself for testing
+            subject: 'VIPRA HR Assistant - Email Test',
+            text: 'This is a test email from VIPRA HR Assistant to verify email configuration.'
+        };
+
+        console.log('Attempting to send test email with config:', {
+            service: process.env.EMAIL_SERVICE || 'gmail',
+            user: process.env.EMAIL_USER,
+            // Password hidden for security
+        });
+
+        // Send test email
+        const info = await transporter.sendMail(testMailOptions);
+        console.log('Test email sent successfully:', info.messageId);
+        
+        res.json({
+            success: true,
+            message: 'Test email sent successfully!',
+            details: {
+                messageId: info.messageId,
+                to: process.env.EMAIL_USER,
+                service: process.env.EMAIL_SERVICE || 'gmail'
+            }
+        });
+    } catch (error) {
+        console.error('Error sending test email:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to send test email',
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
 });
 
 // For local development
@@ -729,6 +851,41 @@ exports.handler = async (event, context) => {
                                     success = false;
                                 }
                                 
+                                // Check if this is a leave approval or rejection and send email notification
+                                const isLeaveApproval = restrictedSql.includes('UPDATE LeaveBalances') && 
+                                                       (restrictedSql.includes('leaves_pending_approval = 0'));
+                                
+                                if (isLeaveApproval) {
+                                    try {
+                                        // Extract user information from the SQL query
+                                        const userNameMatch = restrictedSql.match(/first_name\s*=\s*['"]([^'"]+)['"]/i);
+                                        const leaveTypeMatch = restrictedSql.match(/leave_type\s*=\s*['"]([^'"]+)['"]/i);
+                                        
+                                        if (userNameMatch) {
+                                            const firstName = userNameMatch[1];
+                                            
+                                            // Get user_id for the employee
+                                            const [userResults] = await dbPool.execute(
+                                                'SELECT user_id FROM Users WHERE first_name = ? AND organization_id = ?',
+                                                [firstName, organizationId]
+                                            );
+                                            
+                                            if (userResults.length > 0) {
+                                                const userId = userResults[0].user_id;
+                                                const leaveType = leaveTypeMatch ? leaveTypeMatch[1] : 'leave';
+                                                const action = restrictedSql.includes('leaves_taken = lb.leaves_taken + lb.leaves_pending_approval') ? 
+                                                    'approve' : 'reject';
+                                                
+                                                // Send email notification and wait for it to complete to ensure it's sent in Lambda
+                                                await sendLeaveNotificationEmail(userId, action, leaveType);
+                                            }
+                                        }
+                                    } catch (error) {
+                                        console.error('Error processing leave notification:', error);
+                                        // Don't let email notification errors affect the API response
+                                    }
+                                }
+                                
                                 const responseBody = {
                                     success: success,
                                     message: responseMessage,
@@ -758,6 +915,50 @@ exports.handler = async (event, context) => {
                         }
                     }
                 }
+            }
+        } else if (path === '/test-email' && httpMethod === 'GET') {
+            // Test endpoint for email verification in Lambda
+            try {
+                // Create test email
+                const testMailOptions = {
+                    from: process.env.EMAIL_USER,
+                    to: process.env.EMAIL_USER, // Send to yourself for testing
+                    subject: 'VIPRA HR Assistant - Lambda Email Test',
+                    text: 'This is a test email from VIPRA HR Assistant Lambda to verify email configuration.'
+                };
+
+                console.log('Lambda: Attempting to send test email with config:', {
+                    service: process.env.EMAIL_SERVICE || 'gmail',
+                    user: process.env.EMAIL_USER,
+                    // Password hidden for security
+                });
+
+                // Send test email
+                const info = await transporter.sendMail(testMailOptions);
+                console.log('Lambda: Test email sent successfully:', info.messageId);
+                
+                response = {
+                    statusCode: 200,
+                    body: JSON.stringify({
+                        success: true,
+                        message: 'Test email sent successfully from Lambda!',
+                        details: {
+                            messageId: info.messageId,
+                            to: process.env.EMAIL_USER,
+                            service: process.env.EMAIL_SERVICE || 'gmail'
+                        }
+                    })
+                };
+            } catch (error) {
+                console.error('Lambda: Error sending test email:', error);
+                response = {
+                    statusCode: 500,
+                    body: JSON.stringify({
+                        success: false,
+                        message: 'Failed to send test email from Lambda',
+                        error: error.message
+                    })
+                };
             }
         } else {
             // Route not found
