@@ -48,14 +48,15 @@ Your role is to take a user's question in natural language and convert it into a
 **Output Format:**
 Your entire output MUST be a single JSON object. This object must have two keys:
 1. "sql": A string containing the single, executable SQL query.
-2. "confirmation_message": A user-friendly, natural-language string confirming what action was taken. For example: "Rahul Verma's base salary has been updated to 50000." or "Found the leave balance for Geeta Devi.".
+2. "confirmation_message": A user-friendly, natural-language string confirming what action was taken. For example: "Found Rahul Verma's base salary." or "Found the leave balance for Geeta Devi.".
 
 **Constraints & Rules:**
-1.  **Security First**: The "sql" value MUST NOT contain any query that modifies the database schema (e.g., DROP, ALTER, TRUNCATE) or deletes data (e.g., DELETE). You are only allowed to generate SELECT, INSERT, or UPDATE queries.
-2.  **Single Action**: You can only perform one action (one SQL query) per prompt. 
-3.  **Multi-Action Detection**: If the user asks to do multiple distinct actions (e.g., "update salary AND update leaves"), you MUST NOT generate SQL. Instead, set the "sql" value to "MULTI_ACTION_ERROR" and the "confirmation_message" to "Your request involves multiple actions. Please separate them into individual prompts for clarity and reliability."
-4.  **Context is Key**: Use the provided database schema and sample data to understand the table structure and find the correct IDs for users like 'Amit' or 'Geeta'. The user's 'organization_id', 'user_id', and 'role' will be provided in the prompt for context.
-5.  **Relevance**: If a question is unrelated to the HR schema (e.g., "What is the capital of France?"), you must not generate SQL. Set the "sql" value to "IRRELEVANT". For the "confirmation_message", provide a helpful response that politely declines the off-topic question and guides the user back to the HR assistant's capabilities. For example: "I am an HR assistant for Vipraco and can only answer questions about employee data, leave, payroll, and company policies. How can I help you with an HR-related query?"
+1.  **READ-ONLY ACCESS**: You are ONLY allowed to generate SELECT queries. NEVER generate UPDATE, INSERT, DELETE or any other write operations, even if the user explicitly asks for them. If a user asks to update or modify data, respond with "sql": "ACCESS_DENIED" and "confirmation_message": "This system only allows viewing data. Updates must be performed through the HR department."
+2.  **Security First**: The "sql" value MUST NOT contain any query that modifies the database schema (e.g., DROP, ALTER, TRUNCATE) or modifies data (e.g., DELETE, UPDATE, INSERT). You are only allowed to generate SELECT queries.
+3.  **Single Action**: You can only perform one action (one SQL query) per prompt. 
+4.  **Multi-Action Detection**: If the user asks to do multiple distinct actions (e.g., "update salary AND update leaves"), you MUST NOT generate SQL. Instead, set the "sql" value to "MULTI_ACTION_ERROR" and the "confirmation_message" to "Your request involves multiple actions. Please separate them into individual prompts for clarity and reliability."
+5.  **Context is Key**: Use the provided database schema and sample data to understand the table structure and find the correct IDs for users like 'Amit' or 'Geeta'. The user's 'organization_id', 'user_id', and 'role' will be provided in the prompt for context.
+6.  **Relevance**: If a question is unrelated to the HR schema (e.g., "What is the capital of France?"), you must not generate SQL. Set the "sql" value to "IRRELEVANT". For the "confirmation_message", provide a helpful response that politely declines the off-topic question and guides the user back to the HR assistant's capabilities. For example: "I am an HR assistant for Vipraco and can only answer questions about employee data, leave, payroll, and company policies. How can I help you with an HR-related query?"
 ${roleBasedInstructions}
 ${nameMappingRule}
 ${ambiguityRule}
@@ -83,20 +84,31 @@ ${exampleQueries}
 }
 
 function isQuerySafe(sql) {
+    // SECURITY: Only allow SELECT queries - restrict all write operations
+    const upperSql = sql.toUpperCase().trim();
+    
+    // Check if the query starts with SELECT
+    if (!upperSql.startsWith('SELECT')) {
+        console.log("SECURITY BLOCK: Non-SELECT query rejected:", sql);
+        return false;
+    }
+    
+    // Additional security checks for dangerous operations
     const unsafeKeywords = [
-        'DROP', 'TRUNCATE', 'ALTER', 'DELETE',
+        'DROP', 'TRUNCATE', 'ALTER', 'DELETE', 'UPDATE', 'INSERT',
         'GRANT', 'REVOKE', 'COMMIT', 'ROLLBACK',
         'CREATE', 'RENAME', 'SHUTDOWN'
     ];
-    const upperSql = sql.toUpperCase();
     
     // Check for semicolon to prevent multiple statements
     if (upperSql.split(';').length > 2) { // allow one semicolon at the end
+        console.log("SECURITY BLOCK: Multiple statements detected");
         return false;
     }
 
     for (const keyword of unsafeKeywords) {
         if (upperSql.includes(keyword)) {
+            console.log(`SECURITY BLOCK: Unsafe keyword '${keyword}' detected`);
             return false;
         }
     }
@@ -160,8 +172,27 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ error: 'Missing prompt, x-user-id, or x-organization-id in request' })
+                    body: JSON.stringify({ message: 'Missing prompt, x-user-id, or x-organization-id in request', success: false })
                 };
+            }
+
+            // Check for write operation keywords in the prompt
+            const writeOperationKeywords = ['update', 'change', 'modify', 'set', 'insert', 'delete', 'remove', 'add'];
+            const promptLower = prompt.toLowerCase();
+            
+            for (const keyword of writeOperationKeywords) {
+                if (promptLower.includes(keyword)) {
+                    console.log(`SECURITY: Detected potential write operation keyword '${keyword}' in prompt: ${prompt}`);
+                    return {
+                        statusCode: 403,
+                        headers: headers,
+                        body: JSON.stringify({ 
+                            message: 'This system only allows viewing data. Updates must be performed through the HR department.',
+                            details: 'Write operations are not permitted through this API.',
+                            success: false
+                        })
+                    };
+                }
             }
 
             // LAZY INITIALIZATION: Create clients on first request.
@@ -192,7 +223,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers: headers,
-                    body: JSON.stringify({ error: 'User not found or not part of this organization.' })
+                    body: JSON.stringify({ message: 'User not found or not part of this organization.', success: false })
                 };
             }
             
@@ -223,7 +254,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 500,
                     headers: headers,
-                    body: JSON.stringify({ error: "Received an invalid response from the AI model." })
+                    body: JSON.stringify({ message: "Received an invalid response from the AI model.", success: false })
                 };
             }
 
@@ -235,7 +266,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ error: confirmationMessage || "The request involves multiple actions. Please send separate prompts." })
+                    body: JSON.stringify({ message: confirmationMessage || "The request involves multiple actions. Please send separate prompts.", success: false })
                 };
             }
 
@@ -243,7 +274,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ error: confirmationMessage || "This question is not relevant to HR data." })
+                    body: JSON.stringify({ message: confirmationMessage || "This question is not relevant to HR data.", success: false })
                 };
             }
 
@@ -251,7 +282,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers: headers,
-                    body: JSON.stringify({ error: confirmationMessage || "Access denied." })
+                    body: JSON.stringify({ message: confirmationMessage || "Access denied.", success: false })
                 };
             }
 
@@ -259,7 +290,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ error: confirmationMessage || "The query is ambiguous. Please provide more specific details." })
+                    body: JSON.stringify({ message: confirmationMessage || "The query is ambiguous. Please provide more specific details.", success: false })
                 };
             }
 
@@ -267,7 +298,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers: headers,
-                    body: JSON.stringify({ error: 'Generated query is not allowed for security reasons.' })
+                    body: JSON.stringify({ message: 'Generated query is not allowed for security reasons.', success: false })
                 };
             }
             
@@ -280,6 +311,28 @@ exports.handler = async (event) => {
 
             // For SELECT, result is an array of rows. For others, it's an info object.
             if (Array.isArray(queryResult)) {
+                // Check if data was found
+                if (queryResult.length === 0) {
+                    // No data found, provide natural language response
+                    let noDataMessage;
+                    if (prompt.toLowerCase().includes('salary')) {
+                        noDataMessage = "Sorry, I couldn't find any salary information for you in our records.";
+                    } else if (prompt.toLowerCase().includes('leave')) {
+                        noDataMessage = "Sorry, I couldn't find any leave information for you in our records.";
+                    } else if (prompt.toLowerCase().includes('attendance')) {
+                        noDataMessage = "Sorry, I couldn't find any attendance records for you.";
+                    } else {
+                        noDataMessage = "Sorry, I couldn't find any data matching your request.";
+                    }
+                    
+                    return {
+                        statusCode: 200,
+                        headers: headers,
+                        body: JSON.stringify({ success: true, message: noDataMessage, data: [] })
+                    };
+                }
+                
+                // Data found, use the original confirmation message
                 return {
                     statusCode: 200,
                     headers: headers,
@@ -299,9 +352,10 @@ exports.handler = async (event) => {
                 statusCode: 500,
                 headers: headers,
                 body: JSON.stringify({ 
-                    error: 'Failed to process AI query.', 
+                    message: 'Failed to process AI query.', 
                     details: error.message,
-                    stack: error.stack 
+                    stack: error.stack,
+                    success: false
                 })
             };
         }
@@ -314,7 +368,8 @@ exports.handler = async (event) => {
         body: JSON.stringify({ 
             message: "Not Found from simple handler",
             path: path,
-            method: method
+            method: method,
+            success: false
         }),
     };
 }; 
