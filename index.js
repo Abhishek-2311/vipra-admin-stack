@@ -648,10 +648,7 @@ exports.handler = async (event) => {
                         [userId, organizationId]
                     );
                     
-                    let managerName = "your manager";
-                    if (managerInfo.length > 0) {
-                        managerName = `${managerInfo[0].first_name} ${managerInfo[0].last_name}`;
-                    }
+                    const managerName = "HR admin";
                     
                     // Get updated leave balances to show in response
                     const [updatedLeaveTypes] = await dbPool.execute(
@@ -670,7 +667,7 @@ exports.handler = async (event) => {
                         headers: headers,
                         body: JSON.stringify({ 
                             success: true, 
-                            message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from ${managerName}. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
+                            message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from HR admin. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
                             data: [{
                                 leave_type: specifiedLeaveType,
                                 status: 'PENDING',
@@ -835,10 +832,7 @@ exports.handler = async (event) => {
                             [userId, organizationId]
                         );
                         
-                        let managerName = "your manager";
-                        if (managerInfo.length > 0) {
-                            managerName = `${managerInfo[0].first_name} ${managerInfo[0].last_name}`;
-                        }
+                        const managerName = "HR admin";
                         
                         // Get updated leave balances to show in response
                         const [updatedLeaveTypes] = await dbPool.execute(
@@ -857,7 +851,7 @@ exports.handler = async (event) => {
                             headers: headers,
                             body: JSON.stringify({ 
                                 success: true, 
-                                message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from ${managerName}. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
+                                message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from HR admin. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
                                 data: [{
                                     leave_type: specifiedLeaveType,
                                     status: 'PENDING',
