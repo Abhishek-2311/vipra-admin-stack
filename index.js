@@ -236,7 +236,7 @@ exports.handler = async (event) => {
                     headers: headers,
                     body: JSON.stringify({ 
                         success: true, 
-                        message: "Hello! I'm your HR assistant. How can I help you today? You can ask me about leaves, salary, attendance, or other HR-related information.",
+                        message: "Hello there! I'm your friendly HR assistant. What can I help you with today? Feel free to ask me about your leaves, salary, attendance, and more.",
                         data: []
                     })
                 };
@@ -254,20 +254,20 @@ exports.handler = async (event) => {
                     })
                 };
             }
-            
+
             // Handle identity queries directly without LLM - more reliable and faster
             const identityKeywords = ['my id', 'my user id', 'my employee id', 'my userid', 'who am i'];
             if (identityKeywords.some(keyword => trimmedPrompt.includes(keyword))) {
-                return {
+                    return {
                     statusCode: 200,
-                    headers: headers,
-                    body: JSON.stringify({ 
+                        headers: headers,
+                        body: JSON.stringify({ 
                         success: true, 
                         message: `Your employee ID is ${userId}.`,
                         data: [{ user_id: userId }]
-                    })
-                };
-            }
+                        })
+                    };
+                }
             
             // Detect leave application keywords and types for later processing
             const leaveApplicationKeywords = [
@@ -293,6 +293,67 @@ exports.handler = async (event) => {
             );
             
             console.log("Leave application detection result:", isLeaveApplicationRequest);
+
+            // Extract number of days from prompt
+            let requestedDays = 1; // Default to 1 day
+            let leaveStartDate = null;
+            let leaveEndDate = null;
+
+            // Attempt to parse a date range first
+            const dateRangeMatch = prompt.match(/from\s+(.*?)\s+to\s+(.*)/i);
+
+            if (dateRangeMatch && dateRangeMatch[1] && dateRangeMatch[2]) {
+                try {
+                    // Use a helper to parse dates, assuming current year if not specified
+                    const parseDate = (dateStr) => {
+                        // Check if a year is already present
+                        if (/\d{4}/.test(dateStr)) {
+                            return new Date(dateStr);
+                        }
+                        return new Date(`${dateStr} ${new Date().getFullYear()}`);
+                    };
+
+                    const startDate = parseDate(dateRangeMatch[1].trim());
+                    const endDate = parseDate(dateRangeMatch[2].trim());
+
+                    // Handle year wrap-around for cases like "from Dec 28 to Jan 5"
+                    if (endDate < startDate) {
+                        endDate.setFullYear(endDate.getFullYear() + 1);
+                    }
+
+                    if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
+                        const diffTime = endDate.getTime() - startDate.getTime();
+                        if (diffTime >= 0) {
+                            // Add 1 to make the end date inclusive
+                            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+                            requestedDays = diffDays;
+                            leaveStartDate = startDate;
+                            leaveEndDate = endDate;
+                            console.log(`Calculated ${requestedDays} days from date range.`);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Error parsing date range:", e);
+                    // Could not parse date range, fallback to looking for "X days"
+                }
+            }
+            
+            // If requestedDays is still 1 (meaning date range parsing failed or didn't happen), try parsing "X days"
+            if (requestedDays === 1) {
+                const daysMatch = prompt.match(/\b(\d+)\s+days?/i);
+                if (daysMatch && daysMatch[1]) {
+                    requestedDays = parseInt(daysMatch[1], 10);
+                }
+            }
+
+            console.log(`Requested leave days: ${requestedDays}`);
+
+            const leaveContext = body.leave_context || {};
+            if(body.leave_application_pending) {
+                requestedDays = leaveContext.requested_days || requestedDays;
+                leaveStartDate = leaveContext.start_date ? new Date(leaveContext.start_date) : leaveStartDate;
+                leaveEndDate = leaveContext.end_date ? new Date(leaveContext.end_date) : leaveEndDate;
+            }
             
             // Check if this is a leave application with a specified leave type
             const leaveTypeKeywords = {
@@ -340,7 +401,7 @@ exports.handler = async (event) => {
                 hasEarned: trimmedPrompt.includes('earned'),
                 isLeaveTypeResponse: isLeaveTypeResponse
             });
-            
+
             // LAZY INITIALIZATION: Create clients on first request.
             if (!dbPool) {
                 console.log("Creating database pool");
@@ -363,16 +424,16 @@ exports.handler = async (event) => {
                 });
                 
                 try {
-                    dbPool = mysql.createPool({
-                        host: process.env.DB_HOST,
-                        user: process.env.DB_USER,
-                        password: process.env.DB_PASSWORD,
-                        database: process.env.DB_NAME,
-                        port: process.env.DB_PORT,
-                        waitForConnections: true,
-                        connectionLimit: 10,
-                        queueLimit: 0
-                    });
+                dbPool = mysql.createPool({
+                    host: process.env.DB_HOST,
+                    user: process.env.DB_USER,
+                    password: process.env.DB_PASSWORD,
+                    database: process.env.DB_NAME,
+                    port: process.env.DB_PORT,
+                    waitForConnections: true,
+                    connectionLimit: 10,
+                    queueLimit: 0
+                });
                     
                     // Test the connection
                     console.log("Testing database connection...");
@@ -408,7 +469,7 @@ exports.handler = async (event) => {
             const userFullName = `${users[0].first_name} ${users[0].last_name}`;
             
             // Handle leave balance queries directly for reliability - AFTER DB INIT
-            const leaveKeywords = ['my leave', 'leave balance', 'how many leaves', 'sick leave balance', 'casual leave balance', 'earned leave balance', 'leaves left', 'leaves remaining'];
+            const leaveKeywords = ['my leave', 'leave balance', 'how many leaves', 'sick leave balance', 'casual leave balance', 'earned leave balance', 'leaves left', 'leaves remaining', 'leave balances', 'my leaves', 'my leave balances', 'show me my leave balance'];
             
             // Improved detection to avoid conflicts with leave application
             const isLeaveQuery = leaveKeywords.some(keyword => trimmedPrompt.includes(keyword)) && 
@@ -424,7 +485,7 @@ exports.handler = async (event) => {
                 try {
                     // Direct query for leave balances
                     const [leaveData] = await dbPool.execute(
-                        'SELECT * FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
+                        'SELECT leave_type, total_allotted, leaves_taken, leaves_pending_approval FROM LeaveBalances WHERE user_id = ? AND organization_id = ?', 
                         [userId, organizationId]
                     );
                     
@@ -440,15 +501,24 @@ exports.handler = async (event) => {
                         };
                     }
                     
+                    const totalAllotted = leaveData.length > 0 ? leaveData[0].total_allotted : 0;
+                    const totalTaken = leaveData.reduce((sum, leave) => sum + leave.leaves_taken, 0);
+                    const totalPending = leaveData.reduce((sum, leave) => sum + leave.leaves_pending_approval, 0);
+                    const totalUsed = totalTaken + totalPending;
+                    const remainingLeaves = totalAllotted - totalUsed;
+
+                    const message = `Sure thing! Looking at your leave balance, you have ${remainingLeaves} days left to use out of your total of ${totalAllotted} for the year. So far, you've taken ${totalTaken} days, and you have ${totalPending} more day(s) pending approval. Let me know if you'd like to apply for a leave!`;
+
                     return {
                         statusCode: 200,
                         headers: headers,
-                        body: JSON.stringify({ 
-                            success: true, 
-                            message: `Found your leave balance information.`,
+                        body: JSON.stringify({
+                            success: true,
+                            message: message,
                             data: leaveData
                         })
                     };
+
                 } catch (error) {
                     console.error("Error processing direct leave query:", error);
                     // If direct query fails, continue with LLM-based approach
@@ -512,6 +582,14 @@ exports.handler = async (event) => {
                 if (!specifiedLeaveType) {
                     // Store the pending leave application in a database or session store
                     // This allows us to track state between requests
+                    const pendingState = {
+                        requested_days: requestedDays
+                    };
+
+                    if (leaveStartDate && leaveEndDate) {
+                        pendingState.start_date = leaveStartDate.toISOString();
+                        pendingState.end_date = leaveEndDate.toISOString();
+                    }
                     try {
                         // Check if there's already a pending leave application table
                         const [tableExists] = await dbPool.execute(
@@ -557,14 +635,16 @@ exports.handler = async (event) => {
                         headers: headers,
                         body: JSON.stringify({ 
                             success: true, 
-                            message: "What type of leave would you like to apply for? Please specify: Sick Leave, Casual Leave, or Earned Leave.",
+                            message: "Got it, you'd like to apply for leave. What type of leave should I file this under for you? (e.g., Sick, Casual, or Earned Leave)",
                             data: [],
-                            leave_application_pending: true
+                            leave_application_pending: true,
+                            leave_context: pendingState
                         })
                     };
                 }
                 
                 try {
+                    let query, params;
                     // Additional check for database connection
                     if (!dbPool) {
                         console.error("Database pool is not initialized!");
@@ -609,13 +689,13 @@ exports.handler = async (event) => {
                     // Calculate available leaves
                     const availableLeaves = defaultAllotment - totalLeavesUsed;
                     
-                    if (availableLeaves <= 0) {
+                    if (availableLeaves < requestedDays) {
                         return {
                             statusCode: 200,
                             headers: headers,
                             body: JSON.stringify({ 
                                 success: false, 
-                                message: `You don't have any leave balance available. You've used ${totalLeavesUsed} out of ${defaultAllotment} total leave days.`,
+                                message: `You don't have enough leave balance available for ${requestedDays} days. You only have ${availableLeaves} days remaining.`,
                                 data: []
                             })
                         };
@@ -626,20 +706,30 @@ exports.handler = async (event) => {
                         console.log(`Leave type ${specifiedLeaveType} not found for user. Creating it...`);
                         
                         // Insert the new leave type
-                        await dbPool.execute(
-                            'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, last_updated) VALUES (?, ?, ?, ?, 0, 1, NOW())',
-                            [organizationId, userId, specifiedLeaveType, defaultAllotment]
-                        );
+                        if (leaveStartDate) {
+                            query = 'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, start_date, last_updated) VALUES (?, ?, ?, ?, 0, ?, ?, NOW())';
+                            params = [organizationId, userId, specifiedLeaveType, defaultAllotment, requestedDays, leaveStartDate];
+                        } else {
+                            query = 'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, last_updated) VALUES (?, ?, ?, ?, 0, ?, NOW())';
+                            params = [organizationId, userId, specifiedLeaveType, defaultAllotment, requestedDays];
+                        }
                         
-                        console.log(`Created new leave type ${specifiedLeaveType} for user with 1 pending approval`);
+                        console.log('Executing DB Write:', { query, params });
+                        await dbPool.execute(query, params);
+                        console.log(`Created new leave type ${specifiedLeaveType} for user with ${requestedDays} pending approval`);
                     } else {
                         // Update leaves_pending_approval for the specified leave type
-                        await dbPool.execute(
-                            'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + 1, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
-                            [userId, organizationId, specifiedLeaveType]
-                        );
+                        if (leaveStartDate) {
+                            query = 'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + ?, start_date = ?, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?';
+                            params = [requestedDays, leaveStartDate, userId, organizationId, specifiedLeaveType];
+                        } else {
+                            query = 'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + ?, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?';
+                            params = [requestedDays, userId, organizationId, specifiedLeaveType];
+                        }
                         
-                        console.log(`Updated leave_pending_approval for ${specifiedLeaveType}`);
+                        console.log('Executing DB Write:', { query, params });
+                        await dbPool.execute(query, params);
+                        console.log(`Updated leave_pending_approval for ${specifiedLeaveType} by ${requestedDays} days`);
                     }
                     
                     // Get manager information to include in the response
@@ -662,20 +752,21 @@ exports.handler = async (event) => {
                     
                     const remainingLeaves = defaultAllotment - newTotalLeavesUsed;
                     
+                    let successMessage = `Alright, I've submitted your request for a ${specifiedLeaveType} for ${requestedDays} day(s). It's now with the HR admin for approval. Just so you know, you now have ${remainingLeaves} leave days left for the year.`;
+
+                    if (leaveStartDate && leaveEndDate) {
+                        const options = { year: 'numeric', month: 'long', day: 'numeric' };
+                        const fromDate = leaveStartDate.toLocaleDateString('en-US', options);
+                        const toDate = leaveEndDate.toLocaleDateString('en-US', options);
+                        successMessage = `Alright, I've submitted your request for a ${specifiedLeaveType} for ${requestedDays} day(s), from ${fromDate} to ${toDate}. It's now with the HR admin for approval. Just so you know, you now have ${remainingLeaves} leave days left for the year.`;
+                    }
+                    
                     return {
                         statusCode: 200,
                         headers: headers,
                         body: JSON.stringify({ 
                             success: true, 
-                            message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from HR admin. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
-                            data: [{
-                                leave_type: specifiedLeaveType,
-                                status: 'PENDING',
-                                days_requested: 1,
-                                applied_on: new Date().toISOString(),
-                                remaining_leaves: remainingLeaves,
-                                leave_balances: updatedLeaveTypes
-                            }]
+                            message: successMessage
                         })
                     };
                 } catch (error) {
@@ -748,6 +839,7 @@ exports.handler = async (event) => {
                     }
                     
                     try {
+                        let query, params;
                         // Clean up the pending application
                         try {
                             await dbPool.execute(
@@ -793,13 +885,13 @@ exports.handler = async (event) => {
                         // Calculate available leaves
                         const availableLeaves = defaultAllotment - totalLeavesUsed;
                         
-                        if (availableLeaves <= 0) {
+                        if (availableLeaves < requestedDays) {
                             return {
                                 statusCode: 200,
                                 headers: headers,
                                 body: JSON.stringify({ 
                                     success: false, 
-                                    message: `You don't have any leave balance available. You've used ${totalLeavesUsed} out of ${defaultAllotment} total leave days.`,
+                                    message: `You don't have enough leave balance available for ${requestedDays} days. You only have ${availableLeaves} days remaining.`,
                                     data: []
                                 })
                             };
@@ -810,20 +902,30 @@ exports.handler = async (event) => {
                             console.log(`Leave type ${specifiedLeaveType} not found for user. Creating it...`);
                             
                             // Insert the new leave type
-                            await dbPool.execute(
-                                'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, last_updated) VALUES (?, ?, ?, ?, 0, 1, NOW())',
-                                [organizationId, userId, specifiedLeaveType, defaultAllotment]
-                            );
+                            if (leaveStartDate) {
+                                query = 'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, start_date, last_updated) VALUES (?, ?, ?, ?, 0, ?, ?, NOW())';
+                                params = [organizationId, userId, specifiedLeaveType, defaultAllotment, requestedDays, leaveStartDate];
+                            } else {
+                                query = 'INSERT INTO LeaveBalances (organization_id, user_id, leave_type, total_allotted, leaves_taken, leaves_pending_approval, last_updated) VALUES (?, ?, ?, ?, 0, ?, NOW())';
+                                params = [organizationId, userId, specifiedLeaveType, defaultAllotment, requestedDays];
+                            }
                             
-                            console.log(`Created new leave type ${specifiedLeaveType} for user with 1 pending approval`);
+                            console.log('Executing DB Write:', { query, params });
+                            await dbPool.execute(query, params);
+                            console.log(`Created new leave type ${specifiedLeaveType} for user with ${requestedDays} pending approval`);
                         } else {
                             // Update leaves_pending_approval for the specified leave type
-                            await dbPool.execute(
-                                'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + 1, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?', 
-                                [userId, organizationId, specifiedLeaveType]
-                            );
+                            if (leaveStartDate) {
+                                query = 'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + ?, start_date = ?, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?';
+                                params = [requestedDays, leaveStartDate, userId, organizationId, specifiedLeaveType];
+                            } else {
+                                query = 'UPDATE LeaveBalances SET leaves_pending_approval = leaves_pending_approval + ?, last_updated = NOW() WHERE user_id = ? AND organization_id = ? AND leave_type = ?';
+                                params = [requestedDays, userId, organizationId, specifiedLeaveType];
+                            }
                             
-                            console.log(`Updated leave_pending_approval for ${specifiedLeaveType}`);
+                            console.log('Executing DB Write:', { query, params });
+                            await dbPool.execute(query, params);
+                            console.log(`Updated leave_pending_approval for ${specifiedLeaveType} by ${requestedDays} days`);
                         }
                         
                         // Get manager information to include in the response
@@ -846,20 +948,21 @@ exports.handler = async (event) => {
                         
                         const remainingLeaves = defaultAllotment - newTotalLeavesUsed;
                         
+                        let successMessage = `Alright, I've submitted your request for a ${specifiedLeaveType} for ${requestedDays} day(s). It's now with the HR admin for approval. Just so you know, you now have ${remainingLeaves} leave days left for the year.`;
+
+                        if (leaveStartDate && leaveEndDate) {
+                            const options = { year: 'numeric', month: 'long', day: 'numeric' };
+                            const fromDate = leaveStartDate.toLocaleDateString('en-US', options);
+                            const toDate = leaveEndDate.toLocaleDateString('en-US', options);
+                            successMessage = `Alright, I've submitted your request for a ${specifiedLeaveType} for ${requestedDays} day(s), from ${fromDate} to ${toDate}. It's now with the HR admin for approval. Just so you know, you now have ${remainingLeaves} leave days left for the year.`;
+                        }
+
                         return {
                             statusCode: 200,
                             headers: headers,
                             body: JSON.stringify({ 
                                 success: true, 
-                                message: `Your ${specifiedLeaveType} application has been submitted successfully. It is now pending approval from HR admin. You have ${remainingLeaves} out of ${defaultAllotment} leave days remaining.`,
-                                data: [{
-                                    leave_type: specifiedLeaveType,
-                                    status: 'PENDING',
-                                    days_requested: 1,
-                                    applied_on: new Date().toISOString(),
-                                    remaining_leaves: remainingLeaves,
-                                    leave_balances: updatedLeaveTypes
-                                }]
+                                message: successMessage
                             })
                         };
                     } catch (error) {
@@ -946,7 +1049,7 @@ exports.handler = async (event) => {
                     console.log('Potential false positive with HR context, continuing...');
                 }
             }
-
+            
             const systemPrompt = await getSystemPrompt(userRole);
             const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
@@ -1177,7 +1280,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 500,
                     headers: headers,
-                    body: JSON.stringify({ message: "Received an invalid response from the AI model.", success: false })
+                    body: JSON.stringify({ message: "Received an invalid response from the AI model. Please try rephrasing your question.", success: false })
                 };
             }
 
@@ -1189,7 +1292,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ message: confirmationMessage || "The request involves multiple actions. Please send separate prompts.", success: false })
+                    body: JSON.stringify({ message: "I can only handle one request at a time. Could you please ask about each topic in a separate message?", success: false })
                 };
             }
 
@@ -1197,7 +1300,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ message: confirmationMessage || "This question is not relevant to HR data.", success: false })
+                    body: JSON.stringify({ message: "I can only help with HR-related topics. For example, you could ask me, 'What is my leave balance?'", success: false })
                 };
             }
 
@@ -1205,7 +1308,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers: headers,
-                    body: JSON.stringify({ message: confirmationMessage || "Access denied.", success: false })
+                    body: JSON.stringify({ message: "I'm sorry, but you don't have permission for that. I can only show you information you're authorized to see.", success: false })
                 };
             }
 
@@ -1213,7 +1316,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers: headers,
-                    body: JSON.stringify({ message: confirmationMessage || "The query is ambiguous. Please provide more specific details.", success: false })
+                    body: JSON.stringify({ message: "I found a few people with that name. To make sure I get the right person, could you please provide their last name or employee ID?", success: false })
                 };
             }
 
@@ -1221,7 +1324,7 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 403,
                     headers: headers,
-                    body: JSON.stringify({ message: 'Generated query is not allowed for security reasons.', success: false })
+                    body: JSON.stringify({ message: 'That request looked a bit like it might change the database, so my security systems blocked it. Could you please try rephrasing your query?', success: false })
                 };
             }
             
@@ -1504,7 +1607,7 @@ exports.handler = async (event) => {
                     statusCode: 403,
                     headers: headers,
                     body: JSON.stringify({ 
-                        message: "Access denied. You do not have permission to view this data.",
+                        message: "It looks like you're asking for information you don't have access to. Remember, you can only view your own data.",
                         details: "The request violates access control policies.", 
                         success: false 
                     })
@@ -1518,16 +1621,7 @@ exports.handler = async (event) => {
                 // Check if data was found
                 if (queryResult.length === 0) {
                     // No data found, provide natural language response
-                    let noDataMessage;
-                    if (trimmedPrompt.includes('salary')) {
-                        noDataMessage = "Sorry, I couldn't find any salary information for you in our records.";
-                    } else if (trimmedPrompt.includes('leave')) {
-                        noDataMessage = "Sorry, I couldn't find any leave information for you in our records.";
-                    } else if (trimmedPrompt.includes('attendance')) {
-                        noDataMessage = "Sorry, I couldn't find any attendance records for you.";
-                    } else {
-                        noDataMessage = "Sorry, I couldn't find any data matching your request.";
-                    }
+                    let noDataMessage = "I couldn't find any information for that request. You could try asking about your salary or leave balance instead.";
                     
                     return {
                         statusCode: 200,
@@ -1540,14 +1634,14 @@ exports.handler = async (event) => {
                 return {
                     statusCode: 200,
                     headers: headers,
-                    body: JSON.stringify({ success: true, message: confirmationMessage, data: queryResult })
+                    body: JSON.stringify({ success: true, message: `Got it! ${confirmationMessage}`, data: queryResult })
                 };
             }
 
             return {
                 statusCode: 200,
                 headers: headers,
-                body: JSON.stringify({ success: true, message: confirmationMessage, details: queryResult })
+                body: JSON.stringify({ success: true, message: `Okay, done! ${confirmationMessage}`, details: queryResult })
             };
 
         } catch (error) {
@@ -1556,7 +1650,7 @@ exports.handler = async (event) => {
                 statusCode: 500,
                 headers: headers,
                 body: JSON.stringify({ 
-                    message: 'Failed to process AI query.', 
+                    message: 'Oops! Something went wrong on my end and I couldn\'t complete your request. Please try rephrasing your question or ask something simpler.', 
                     details: error.message,
                     stack: error.stack,
                     success: false

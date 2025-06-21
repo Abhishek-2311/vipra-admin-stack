@@ -1,0 +1,139 @@
+
+# Vipra-Admin-Stack: Serverless HR Assistant API Documentation
+
+## 1. Project Overview
+
+The Vipra-Admin-Stack is a sophisticated, serverless HR assistant API designed to function as an intelligent backend for an HR management platform. Built on AWS Lambda and Node.js, it leverages the Google Gemini large language model (LLM) to provide a natural language interface for employees to query their personal data, check leave balances, and apply for leave.
+
+The core design philosophy is "security first," with a robust, multi-layered approach to data protection. This includes strict role-based access control (RBAC), AI-generated query validation, and hard-coded handlers for sensitive operations to ensure that employees can only access information they are explicitly authorized to see. The system is multi-tenant capable, using an `organization_id` to isolate data between different client companies.
+
+## 2. Architecture & Tech Stack
+
+The project is a single AWS Lambda function that exposes an API via Amazon API Gateway.
+
+*   **Compute**: AWS Lambda (`nodejs20.x` runtime)
+*   **API**: Amazon API Gateway (REST API)
+*   **Database**: MySQL (hosted on Railway)
+*   **AI Model**: Google Gemini (`gemini-1.5-flash`)
+*   **Dependencies**:
+    *   `@google/generative-ai`: To interact with the Gemini API.
+    *   `mysql2/promise`: A modern, promise-based MySQL driver for Node.js.
+    *   `dotenv`: To manage environment variables for local development.
+
+The entire infrastructure is defined as code in the `template.yaml` file using the AWS Serverless Application Model (SAM), enabling easy and repeatable deployments.
+
+## 3. Core Features
+
+### 3.1. Natural Language to SQL Generation
+
+The primary function of the API is to translate an employee's natural language question (e.g., "what is my salary?") into a precise, secure SQL query.
+
+*   **System Prompt**: Before sending a user's question to the AI, the system constructs a detailed "system prompt." This prompt is a crucial instruction set for the Gemini model and includes:
+    1.  The complete database schema (`schema.txt`).
+    2.  Sample data rows to provide context on data format (`sampledata.txt`).
+    3.  A list of example questions and their corresponding SQL queries (`example queries.txt`).
+    4.  A set of strict rules, including the prohibition of write operations (`INSERT`, `UPDATE`, `DELETE`) and role-based data scoping instructions.
+*   **AI Interaction**: The user's query is appended to this system prompt and sent to the Gemini model. The model is instructed to return a JSON object containing the generated `sql` query and a conversational `confirmation_message`.
+
+### 3.2. Role-Based Access Control (RBAC)
+
+RBAC is the cornerstone of the system's security model. At the beginning of each request, the user's role is fetched from the `Users` table and used to enforce data access policies.
+
+*   **Employee**: The strictest role. All generated SQL queries are programmatically validated to ensure they contain a `WHERE` clause filtering by the user's own `user_id`. Any attempt to query another user's data is blocked.
+*   **Manager**: Can access their own data and the data of their direct reports (employees whose `manager_id` matches the manager's `user_id`).
+*   **Admin**: The most permissive role. Can access data for any user within their `organization_id`.
+
+### 3.3. Specialized Query Handlers (AI Bypass)
+
+To enhance reliability, performance, and security for common and sensitive queries, several handlers bypass the AI model entirely and execute hard-coded logic.
+
+*   **Conversational Endpoints**: Handles simple greetings ("hello") and expressions of gratitude ("thank you") with pre-defined conversational responses.
+*   **Identity Queries**: Directly returns the user's ID for prompts like "what is my employee id?", preventing unnecessary database or AI calls.
+*   **Salary & Leave Balance Queries**: These use direct, parameterized SQL queries to fetch payroll and leave information. This is a critical security measure to ensure that access to sensitive financial data is governed by secure, predictable application code, not the LLM.
+
+### 3.4. Leave Application System
+
+This is a multi-step, stateful feature that allows users to apply for leave conversationally.
+
+1.  **Intent Detection**: The system uses a list of keywords (e.g., "apply for leave," "need time off") to detect a user's intent to apply for leave.
+2.  **Date & Day Parsing**: It can parse the number of leave days from the prompt, supporting both date ranges ("from June 5 to June 7") and explicit day counts ("for 3 days"). It defaults to 1 day if not specified.
+3.  **Multi-Step Conversation**: If a user asks for leave without specifying the *type* (e.g., "I need a leave"), the system maintains the context of the request (`leave_application_pending: true`) and asks for clarification ("What type of leave?"). The frontend is expected to send this flag back with the user's subsequent response.
+4.  **Balance Validation**: Before submitting the application, the system checks the `LeaveBalances` table to ensure the requested number of days does not exceed the user's available balance.
+5.  **Database Updates**: A successful application increments the `leaves_pending_approval` column in the `LeaveBalances` table. If the user doesn't have a record for the requested leave type, a new one is created.
+6.  **Confirmation**: The user receives a friendly confirmation message summarizing the request (e.g., "Alright, I've submitted your request for a Sick Leave for 3 day(s). It's now with the HR admin for approval.").
+
+## 4. Security Guardrails
+
+Security is paramount and is implemented through a series of checks and validations at multiple stages of the request lifecycle.
+
+*   **AI Prompt Engineering**: The system prompt given to the Gemini model explicitly forbids it from generating `UPDATE`, `INSERT`, `DELETE`, or any other database-modifying queries.
+*   **SQL Safety Check (`isQuerySafe`)**: Every single SQL query generated by the AI is passed through this function before execution. It uses a combination of keyword blocking and regex patterns to check for:
+    *   Forbidden write-operation keywords (`DROP`, `UPDATE`, etc.).
+    *   Multiple statements (to prevent stacked queries).
+    *   Dangerous patterns indicative of SQL injection (`UNION`, `OR 1=1`, inline comments).
+*   **Access Control Validation (`validateAccessControl`)**: After a query is deemed safe, this function performs a second, more critical validation. It analyzes the generated SQL to ensure it complies with the user's role-based permissions (e.g., confirming an 'Employee' query contains a `WHERE user_id = ?` clause).
+*   **Prompt Keyword Blocking**: The system proactively inspects the user's raw prompt for write-operation keywords ("update," "delete," "modify," etc.). If found, the request is blocked before it ever reaches the AI, unless it's within a recognized safe context like a leave application.
+*   **Security Logging**: The system generates security log objects for any suspicious activity, such as an employee attempting to query another user's data or using keywords like "bypass" or "admin."
+
+## 5. API Endpoint Definition
+
+The primary endpoint for this service is `/ai-query`.
+
+*   **Path**: `/ai-query`
+*   **Method**: `POST`
+*   **Headers**:
+    *   `x-user-id` (string, required): The unique ID of the user making the request.
+    *   `x-organization-id` (string, required): The ID of the organization the user belongs to.
+*   **Body** (JSON):
+    ```json
+    {
+      "prompt": "Your natural language question here",
+      "leave_application_pending": false, // Optional: for multi-step leave
+      "leave_context": {} // Optional: context for leave application
+    }
+    ```
+*   **Success Response** (Status `200`):
+    ```json
+    {
+      "success": true,
+      "message": "A conversational response from the assistant.",
+      "data": [
+        // Array of objects from the database query result
+      ]
+    }
+    ```
+*   **Error Response** (Status `4xx` or `5xx`):
+    ```json
+    {
+        "success": false,
+        "message": "A user-friendly error message."
+    }
+    ```
+
+## 6. Database Schema
+
+The application relies on a MySQL database with the following tables, as defined in `schema.txt`:
+
+*   **`Organizations`**: Stores client company information.
+*   **`Users`**: Contains core employee data, including `role` and `manager_id` for RBAC.
+*   **`LeaveBalances`**: Tracks allotted, taken, and pending leaves for each user and leave type.
+*   **`PayrollData`**: Holds simplified salary and compensation information.
+*   **`CompanyPolicies`**: A knowledge base table containing company policy documents.
+
+## 7. Setup & Deployment
+
+### Local Development
+
+1.  **Prerequisites**: Node.js and a running MySQL instance.
+2.  **Install Dependencies**: `npm install` within the `vipra-admin-stack` directory.
+3.  **Environment Variables**: Create a `.env` file and populate it with your `GEMINI_API_KEY` and MySQL database credentials.
+4.  **Database Setup**: Execute the SQL commands in `RUN_INSTRUCTIONS.md` to create the necessary tables and populate them with sample data.
+5.  **Run**: `node index.js` to start the local server.
+
+### AWS Deployment
+
+The application is designed for easy deployment using AWS SAM CLI.
+
+1.  **Prerequisites**: AWS CLI and AWS SAM CLI installed and configured.
+2.  **Build**: `sam build`
+3.  **Deploy**: `sam deploy --guided`. You will be prompted for parameters, most importantly your `GeminiApiKey`. SAM will then provision the necessary AWS resources (Lambda, API Gateway) and deploy the code.
